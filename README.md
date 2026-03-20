@@ -74,12 +74,11 @@ cp .env.example .env
 编辑 `.env`，至少填写以下三项：
 
 ```env
-LLM_API_KEY=sk-ant-xxxxx           # 你的 API Key
-LLM_MODEL=claude-opus-4-6          # 模型名称
-LLM_PROVIDER=anthropic             # openai 或 anthropic
+LLM_API_KEY=                              # 你的 API Key
+LLM_MODEL=                                 # 模型名称
+LLM_PROVIDER=anthropic/openai             # openai 或 anthropic
+LLM_BASE_URL=
 ```
-
-> 使用 OpenAI 兼容接口时，还需设置 `LLM_BASE_URL`。
 
 ### 2. 启动服务
 
@@ -87,7 +86,7 @@ LLM_PROVIDER=anthropic             # openai 或 anthropic
 bash scripts/service.sh start
 ```
 
-服务在后台启动，默认监听 `:8080`。
+服务在后台启动，默认监听 `:8081`。
 
 ```bash
 tail -f logs/stdout.log    # 查看运行日志
