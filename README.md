@@ -50,15 +50,6 @@ Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.m
   ▼
 流式响应（SSE / WebSocket）→ Web UI / 飞书 / 企微
 ```
-
-**三个核心机制**：
-
-| 机制 | 说明 |
-|---|---|
-| **技能懒加载** | 服务启动只加载技能摘要（HEAD）。LLM 调用 `skill(action=load)` 时才读取完整流程，节省 token |
-| **工具文档懒加载** | 系统提示只注入工具列表，LLM 按需调用 `get_tool_doc` 获取详细参数——同一效果，消耗更少 token |
-| **热更新** | `ROLE.md` / `SKILL.md` 修改后，当前对话中调用 `skill(action=reload)` 即生效，无需重启 |
-
 ---
 
 ## 快速开始
