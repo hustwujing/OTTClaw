@@ -34,10 +34,10 @@ cd "$ROOT_DIR"
 
 # ── 颜色输出 ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()    { echo -e "${CYAN}[publish]${NC} $*"; }
-success() { echo -e "${GREEN}[publish]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[publish]${NC} $*"; }
-error()   { echo -e "${RED}[publish]${NC} $*" >&2; exit 1; }
+info()    { printf "${CYAN}[publish]${NC} %s\n" "$*"; }
+success() { printf "${GREEN}[publish]${NC} %s\n" "$*"; }
+warn()    { printf "${YELLOW}[publish]${NC} %s\n" "$*"; }
+error()   { printf "${RED}[publish]${NC} %s\n" "$*" >&2; exit 1; }
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 command -v git     >/dev/null 2>&1 || error "未找到 git，请先安装。"
@@ -61,20 +61,26 @@ fi
 
 # ── 读取参数（命令行 > 环境变量 > 交互输入）──────────────────────────────────
 
-# Token（仅用于 API 建仓库）
+# Token（仅用于 API 建仓库，仓库已存在时可留空）
 GH_TOKEN="${1:-${GH_TOKEN:-}}"
 if [[ -z "$GH_TOKEN" ]]; then
-  read -rsp "GitHub Personal Access Token（仅用于创建仓库，输入不显示）: " GH_TOKEN
+  read -rsp "GitHub Personal Access Token（仓库已存在可直接回车跳过）: " GH_TOKEN
   echo ""
 fi
-[[ -z "$GH_TOKEN" ]] && error "Token 不能为空（需要用于调用 GitHub API 创建仓库）。"
 
 # 验证 Token，同时获取用户名
-info "正在验证 Token..."
-GH_USER=$(curl -sf -H "Authorization: token $GH_TOKEN" https://api.github.com/user \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null) \
-  || error "Token 无效或网络异常，请检查后重试。"
-success "已验证，用户名：$GH_USER"
+if [[ -n "$GH_TOKEN" ]]; then
+  info "正在验证 Token..."
+  GH_USER=$(curl -sf -H "Authorization: token $GH_TOKEN" https://api.github.com/user \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null) \
+    || error "Token 无效或网络异常，请检查后重试。"
+  success "已验证，用户名：$GH_USER"
+else
+  # 没有 Token，从 SSH 连接结果或 git remote 推断用户名
+  GH_USER=$(echo "$SSH_OUT" | sed -n 's/^Hi \([^!]*\)!.*/\1/p')
+  [[ -z "$GH_USER" ]] && error "无法获取用户名，请提供 Token 或检查 SSH 配置。"
+  info "用户名（来自 SSH）：$GH_USER"
+fi
 
 # 仓库名称
 REPO_NAME="${2:-${REPO_NAME:-OTTClaw}}"
@@ -178,25 +184,28 @@ done
 git add .
 
 # ── Step 5：创建 GitHub 仓库 ───────────────────────────────────────────────────
-info "在 GitHub 创建仓库 $REPO_NAME..."
+if [[ -n "$GH_TOKEN" ]]; then
+  info "在 GitHub 创建仓库 $REPO_NAME..."
+  REPO_DESC="OpenClaw 的服务器版——让整个团队共享同一套 AI Agent 能力，无需每人单独部署。"
+  CREATE_RESP=$(curl -sf -X POST \
+    -H "Authorization: token $GH_TOKEN" \
+    -H "Content-Type: application/json" \
+    https://api.github.com/user/repos \
+    -d "{\"name\":\"$REPO_NAME\",\"description\":\"$REPO_DESC\",\"private\":$REPO_PRIVATE,\"has_issues\":true,\"has_wiki\":false}" \
+    2>/dev/null) || true
 
-REPO_DESC="OpenClaw 的服务器版——让整个团队共享同一套 AI Agent 能力，无需每人单独部署。"
-CREATE_RESP=$(curl -sf -X POST \
-  -H "Authorization: token $GH_TOKEN" \
-  -H "Content-Type: application/json" \
-  https://api.github.com/user/repos \
-  -d "{\"name\":\"$REPO_NAME\",\"description\":\"$REPO_DESC\",\"private\":$REPO_PRIVATE,\"has_issues\":true,\"has_wiki\":false}" \
-  2>/dev/null) || true
+  REPO_URL=$(echo "$CREATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url',''))" 2>/dev/null)
+  REPO_ERR=$(echo "$CREATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null)
 
-REPO_URL=$(echo "$CREATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url',''))" 2>/dev/null)
-REPO_ERR=$(echo "$CREATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null)
-
-if [[ -n "$REPO_URL" ]]; then
-  success "仓库已创建：$REPO_URL"
-elif echo "$REPO_ERR" | grep -q "already exists"; then
-  warn "仓库已存在，将直接推送到已有仓库。"
+  if [[ -n "$REPO_URL" ]]; then
+    success "仓库已创建：$REPO_URL"
+  elif echo "$REPO_ERR" | grep -q "already exists"; then
+    warn "仓库已存在，将直接推送到已有仓库。"
+  else
+    error "创建仓库失败：$REPO_ERR"
+  fi
 else
-  error "创建仓库失败：$REPO_ERR"
+  warn "未提供 Token，跳过创建仓库（假设仓库已存在）。"
 fi
 
 # ── Step 6：更新 README 中的仓库链接 ──────────────────────────────────────────
