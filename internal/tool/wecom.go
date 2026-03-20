@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/tool/wecom.go — 企业微信相关工具处理器
 // 提供 3 个工具：wecom_send / get_wecom_config / set_wecom_config

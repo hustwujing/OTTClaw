@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/mcp/http.go — MCP Streamable HTTP transport 实现 (v1: 非流式 JSON)
 //

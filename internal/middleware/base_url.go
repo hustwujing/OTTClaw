@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/middleware/base_url.go — 从每次 HTTP 请求中提取 scheme://host，
 // 缓存为服务对外访问的 base URL，供工具侧（如 output_file）拼接完整链接使用。

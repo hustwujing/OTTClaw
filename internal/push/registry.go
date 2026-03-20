@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/push/registry.go — 基于 session 的服务端主动推送通道
 // 用于 cron 任务完成后实时通知前端，前端通过 GET /api/notify 订阅

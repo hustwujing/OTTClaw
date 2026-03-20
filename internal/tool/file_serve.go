@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/tool/file_serve.go — output_file(action=download) 实现
 // 生成带 TTL 的一次性下载 token，前端通过 /download/:token 取文件。

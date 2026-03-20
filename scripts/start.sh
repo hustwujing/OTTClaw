@@ -2,7 +2,7 @@
 # Author:    Vijay
 # Email:     hustwujing@163.com
 # Date:      2026
-# Copyright: Copyright (c) 2026 维杰（邬晶）
+# Copyright: Copyright (c) 2026 Vijay
 #
 # scripts/start.sh — 启动预编译发布包中的 OTTClaw 服务
 # 用法：bash scripts/start.sh

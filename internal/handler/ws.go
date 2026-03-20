@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/handler/ws.go — WebSocket /ws?session_id=xxx&token=xxx
 // 支持持久连接，每条用户消息触发一轮 Agent LLM 循环，流式返回回答

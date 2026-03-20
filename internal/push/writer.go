@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/push/writer.go — CronWriter 实现 agent.StreamWriter 接口
 // 将 agent 输出实时推送到 push.Default（供前端 /api/notify 消费）

@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/handler/app_info.go — GET /api/app-info
 // 返回当前 ROLE.md 中解析出的应用显示名称和头像 URL，供前端动态更新标题栏和对话气泡。

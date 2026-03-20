@@ -2,7 +2,7 @@
 # Author:    Vijay
 # Email:     hustwujing@163.com
 # Date:      2026
-# Copyright: Copyright (c) 2026 维杰（邬晶）
+# Copyright: Copyright (c) 2026 Vijay
 #
 # scripts/pack.sh — 打包发行 zip，去除所有运行时数据和敏感信息
 # 用法: bash scripts/pack.sh [输出文件名]

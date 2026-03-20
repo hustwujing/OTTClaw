@@ -2,7 +2,7 @@
 # Author:    Vijay
 # Email:     hustwujing@163.com
 # Date:      2026
-# Copyright: Copyright (c) 2026 维杰（邬晶）
+# Copyright: Copyright (c) 2026 Vijay
 #
 # scripts/service.sh — OTTClaw 服务管理脚本（启动 / 停止）
 # 用法：

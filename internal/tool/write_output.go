@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/tool/write_output.go — output_file 工具实现（action=write/download）
 // write: 将内容写入 output/{MD5第二位字符}/ 目录，自动生成下载 token，一次调用返回 path + download_url。

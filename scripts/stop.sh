@@ -2,7 +2,7 @@
 # Author:    Vijay
 # Email:     hustwujing@163.com
 # Date:      2026
-# Copyright: Copyright (c) 2026 维杰（邬晶）
+# Copyright: Copyright (c) 2026 Vijay
 #
 # scripts/stop.sh — 停止 OTTClaw 服务
 # 用法：bash scripts/stop.sh

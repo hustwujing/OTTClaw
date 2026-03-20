@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/handler/protocol.go — WS / SSE 统一推送消息格式
 // WS 以 JSON 帧推送，SSE 以 "data: {...}\n\n" 推送，JSON 结构完全一致，前端可统一解析。

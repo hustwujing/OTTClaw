@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/tool/file_writer.go — Office 文档生成（.docx / .xlsx / .pdf）
 // .docx / .xlsx 均为 ZIP+XML（OOXML），无需外部依赖。

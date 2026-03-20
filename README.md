@@ -332,4 +332,4 @@ OTTClaw/
 
 ## License
 
-MIT © 2026 维杰（邬晶）
+MIT © 2026 Vijay

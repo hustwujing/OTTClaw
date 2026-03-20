@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/handler/notify.go — GET /api/notify — 服务端主动推送（SSE）
 // 前端打开某个 session 时订阅此端点，cron 任务运行时会实时推送事件

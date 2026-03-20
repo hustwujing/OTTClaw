@@ -1,7 +1,7 @@
-// Author:    维杰（邬晶）
-// Email:     wujing03@bilibili.com
+// Author:    Vijay
+// Email:     hustwujing@163.com
 // Date:      2026
-// Copyright: Copyright (c) 2026 维杰（邬晶）
+// Copyright: Copyright (c) 2026 Vijay
 
 // internal/agent/agent.go — LLM Agent 核心循环
 // 流程：构造 prompt → 流式调用 LLM → 判断 tool call / 普通回答 → 循环直到无工具调用
