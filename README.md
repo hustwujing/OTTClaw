@@ -71,7 +71,7 @@ cd OTTClaw
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填写以下三项：
+编辑 `.env`，至少填写以下信息：
 
 ```env
 LLM_API_KEY=                              # 你的 API Key
