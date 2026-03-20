@@ -91,19 +91,25 @@ cat > .gitignore << 'EOF'
 # 本地环境变量（含敏感信息，不提交）
 .env
 
-# 编译产物
-bin/
+# 编译产物（保留空目录）
+bin/*
+!bin/.gitkeep
 
-# 运行时数据
-data/
-run/
+# 运行时数据（保留空目录）
+data/*
+!data/.gitkeep
+run/*
+!run/.gitkeep
 
-# 用户上传 / 生成文件
-uploads/
-output/
+# 用户上传 / 生成文件（保留空目录）
+uploads/*
+!uploads/.gitkeep
+output/*
+!output/.gitkeep
 
-# 日志
-logs/
+# 日志（保留空目录）
+logs/*
+!logs/.gitkeep
 
 # Node.js 依赖
 browser-server/node_modules/
@@ -111,8 +117,9 @@ browser-server/node_modules/
 # Python 虚拟环境
 client/.venv/
 
-# 用户自定义技能（个人数据，不入库）
-skills/users/*/
+# 用户自定义技能（个人数据，保留空目录）
+skills/users/*
+!skills/users/.gitkeep
 
 # Claude Code 工作目录
 .claude/
@@ -121,14 +128,16 @@ skills/users/*/
 .DS_Store
 EOF
 
-# ── Step 3：处理 skills/users/ ────────────────────────────────────────────────
-info "处理 skills/users/ 目录..."
-mkdir -p skills/users
-# 若已被追踪则移除
-if git ls-files --error-unmatch skills/users/ >/dev/null 2>&1; then
-  git rm -r --cached skills/users/ 2>/dev/null || true
-fi
-touch skills/users/.gitkeep
+# ── Step 3：为运行时目录创建 .gitkeep（保留空目录结构）─────────────────────────
+info "创建空目录占位文件（.gitkeep）..."
+for DIR in bin data run uploads output logs skills/users; do
+  mkdir -p "$DIR"
+  touch "$DIR/.gitkeep"
+  # 若已被追踪的旧内容存在，先清除
+  git rm -r --cached "$DIR/" 2>/dev/null || true
+  git add "$DIR/.gitkeep"
+  success "  $DIR/.gitkeep"
+done
 
 # ── Step 4：用 bootstrap 模板替换个人配置文件 ─────────────────────────────────
 info "将 config/bootstrap/ 模板写入 git index..."
