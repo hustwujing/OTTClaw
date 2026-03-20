@@ -1,16 +1,16 @@
 # OTTClaw
 
-> OpenClaw 的服务器版——让整个团队共享同一套 AI Agent 能力，无需每人单独部署。
+> OpenClaw 的服务器版——让整个团队共享同一只 龙虾 能力，无需每人单独部署，每个人的信息、记录相互隔离，极限节约成本，解决部门级别的龙虾使用问题。
 
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://golang.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-[OpenClaw](https://github.com/openclaw/openclaw) 是一款强大的本地 AI Agent 工具，但它只能在本地单机运行，**一套环境只能一个人用**。团队场景下，每人都要自己维护配置、自己接入 LLM API、自己安装依赖——重复成本极高。
+[OpenClaw](https://github.com/openclaw/openclaw) 是一款强大的本地 AI Agent 工具，但它只能在本地单机运行，**一套环境只能一个人用**。团队场景下，每人都要自己部署、维护配置、自己接入 LLM API、自己安装依赖——重复成本极高，尤其对非技术工种而言，更是地域噩梦。
 
-**OTTClaw 解决的正是这个问题。** 管理员在服务器上部署一次，通过邀请码分发访问权限；团队成员打开浏览器即可使用完整的 Agent 能力，无需安装任何本地依赖。每位成员的会话历史、浏览器登录态、生成文件**完全隔离**，互不干扰。
+**OTTClaw 解决的正是这个问题。** 管理员在服务器上部署一次，通过邀请码分发访问权限；团队成员打开浏览器即可使用完整的 Agent 能力，无需安装任何本地依赖。每位成员的会话历史、浏览器登录态、生成文件**完全隔离**，互不干扰。在此基础上，进行二次开发，接入内部数据，即可达到让全员vibe办公的境界，让办公效率倍速提升。
 
-Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.md`），改完即生效，无需重启。
+Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.md`）。当然，你不用亲自去编辑这两个文件，OTTClaw会在初始化的web页面中，通过友好的提示，让管理员能轻松快捷设置这只龙虾的角色（是打杂工？是专业编剧？），设置你团队的人要用到的公共的工作技能与流程。
 
 ---
 
@@ -19,10 +19,10 @@ Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.m
 - **OpenClaw 的团队版**：解决 OpenClaw 只能单人本地使用的限制；一台服务器部署，全团队通过浏览器访问，无需每人单独维护环境
 - **邀请码访问控制**：管理员签发邀请码分发给成员，支持设备数限制和有效期；成员换取 JWT 后自动续签，无感使用
 - **多用户完全隔离**：每位成员独立的会话历史、浏览器 Cookie / 登录态、KV 存储和生成文件，互不可见
-- **零代码扩展**：通过 Markdown 文件定义 AI 角色和技能，修改即生效，无需重新编译
+- **零代码扩展**：通过 Markdown 文件定义 这只龙虾 的角色和技能，修改即生效，无需重新编译
 - **Agent 循环**：LLM 自动调用工具、处理结果、持续推理，直到完成任务
 - **多 LLM 支持**：OpenAI / Anthropic / 任何 OpenAI 兼容接口，支持多节点 round-robin 负载均衡
-- **浏览器自动化**：内置 Playwright sidecar，支持爬取、填表、截图，按用户隔离 Cookie 和登录态
+- **浏览器自动化**：稳定的浏览器操作，内置 Playwright sidecar，支持爬取、填表、截图，按用户隔离 Cookie 和登录态，让你搜集资料方便快捷
 - **多平台接入**：内置 Web 界面、飞书长连接、企业微信 Webhook、Python 终端客户端
 - **完整工具集**：文件系统、Shell 执行（带审批流）、KV 存储、定时任务、MCP 集成、Office 文档生成
 
@@ -105,7 +105,7 @@ bash scripts/service.sh stop   # 停止服务
 
 ### 3. 访问 Web 界面
 
-打开 `http://localhost:8080`，在"连接配置"弹窗中输入邀请码完成登录，即可开始对话。
+打开 `http://localhost:8081`，在"连接配置"弹窗中输入邀请码完成登录，即可开始对话。
 
 ### 4. 控制台客户端（可选）
 
@@ -179,10 +179,11 @@ go run cmd/gen-token/main.go token alice 24h
 
 ```
 skills/
-  my_skill/
+  ${user_name}/
     SKILL.md      ← 技能定义
     script/       ← 可执行脚本（可选）
-    assets/       ← 参考资料（可选）
+    assets/       ← 用户资产（可选）
+    references/   ← 参考资料（可选）
 ```
 
 `SKILL.md` 由两行 `==============================` 分隔为 HEAD（元数据）和 CONTENT（执行流程）：
@@ -233,7 +234,7 @@ AI：好的，先告诉我触发时机和执行流程…（引导完成后热更
 
 ### 角色配置（ROLE.md）
 
-`config/ROLE.md` 定义 AI 的身份、行为规则和语气风格，直接注入系统提示词。修改后通过 `update_role_md` 工具热更新，无需重启。
+`config/ROLE.md` 定义 AI 的身份、行为规则和语气风格，直接注入系统提示词。无需直接编辑该文件，初始化阶段系统会引导管理员以对话方式生成。
 
 ---
 
