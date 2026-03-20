@@ -1,6 +1,6 @@
 # OTTClaw
 
-> OpenClaw 的服务器版——让整个团队共享同一只 龙虾 能力，无需每人单独部署，每个人的信息、记录相互隔离，极限节约成本，解决部门级别的龙虾使用问题。
+> OpenClaw 的服务器版——让整个团队共享同一只 龙虾，无需每人单独部署，每个人的信息、记录相互隔离，极限节约成本，解决部门级别的龙虾使用问题。
 
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://golang.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=nodedotjs)](https://nodejs.org)
