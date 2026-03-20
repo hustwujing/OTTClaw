@@ -1,0 +1,38 @@
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "description": "Read/write files on server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ],
+      "keywords": [
+        "file",
+        "read",
+        "write",
+        "directory",
+        "folder",
+        "文件",
+        "目录"
+      ]
+    },
+    {
+      "name": "github",
+      "description": "GitHub repository operations",
+      "transport": "http",
+      "url": "http://localhost:3001/mcp",
+      "keywords": [
+        "github",
+        "repo",
+        "pr",
+        "issue",
+        "commit",
+        "仓库"
+      ]
+    }
+  ]
+}
