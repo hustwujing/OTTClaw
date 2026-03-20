@@ -6,20 +6,25 @@
 #
 # scripts/publish.sh — 将 OTTClaw 发布到 GitHub
 #
-# 用法：
-#   bash scripts/publish.sh <token> [仓库名] [public|private]
-#   GH_TOKEN=xxx bash scripts/publish.sh
-#   GH_TOKEN=xxx REPO_NAME=OTTClaw REPO_VISIBILITY=public bash scripts/publish.sh
+# 前置条件：已配置 SSH Key 并添加到 GitHub
+#   ssh-keygen -t ed25519 -C "your@email.com"
+#   然后将 ~/.ssh/id_ed25519.pub 添加到 https://github.com/settings/ssh/new
 #
+# 用法：
+#   bash scripts/publish.sh <github_token> [仓库名] [public|private]
+#   GH_TOKEN=xxx bash scripts/publish.sh
+#
+# Token 仅用于通过 GitHub API 创建仓库，push 走 SSH 无需 Token。
 # 参数优先级：命令行参数 > 环境变量 > 交互式输入
 #
 # 完成以下操作：
-#   1. 初始化本地 git 仓库（如尚未初始化）
-#   2. 写入 .gitignore（排除运行时数据、个人配置等）
-#   3. 为运行时目录创建 .gitkeep（保留空目录结构）
-#   4. 用 config/bootstrap/ 模板替换 git index 中的个人配置文件
-#   5. 通过 GitHub API 创建远程仓库
-#   6. 提交并推送所有代码
+#   1. 检查 SSH 连接是否正常
+#   2. 初始化本地 git 仓库（如尚未初始化）
+#   3. 写入 .gitignore（排除运行时数据、个人配置等）
+#   4. 为运行时目录创建 .gitkeep（保留空目录结构）
+#   5. 用 config/bootstrap/ 模板替换 git index 中的个人配置文件
+#   6. 通过 GitHub API 创建远程仓库
+#   7. 提交并以 SSH 推送代码
 
 set -euo pipefail
 
@@ -35,8 +40,8 @@ warn()    { echo -e "${YELLOW}[publish]${NC} $*"; }
 error()   { echo -e "${RED}[publish]${NC} $*" >&2; exit 1; }
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
-command -v git    >/dev/null 2>&1 || error "未找到 git，请先安装。"
-command -v curl   >/dev/null 2>&1 || error "未找到 curl，请先安装。"
+command -v git     >/dev/null 2>&1 || error "未找到 git，请先安装。"
+command -v curl    >/dev/null 2>&1 || error "未找到 curl，请先安装。"
 command -v python3 >/dev/null 2>&1 || error "未找到 python3，请先安装。"
 
 echo ""
@@ -45,15 +50,24 @@ echo "       OTTClaw → GitHub 发布工具"
 echo "═══════════════════════════════════════"
 echo ""
 
+# ── Step 0：检查 SSH 连接 ──────────────────────────────────────────────────────
+info "检查 SSH 连接..."
+SSH_OUT=$(ssh -T git@github.com 2>&1 || true)
+if echo "$SSH_OUT" | grep -q "successfully authenticated"; then
+  success "SSH 连接正常：$SSH_OUT"
+else
+  error "SSH 连接失败：$SSH_OUT\n请先完成 SSH Key 配置：\n  1. ssh-keygen -t ed25519 -C \"your@email.com\"\n  2. 将 ~/.ssh/id_ed25519.pub 添加到 https://github.com/settings/ssh/new"
+fi
+
 # ── 读取参数（命令行 > 环境变量 > 交互输入）──────────────────────────────────
 
-# Token
+# Token（仅用于 API 建仓库）
 GH_TOKEN="${1:-${GH_TOKEN:-}}"
 if [[ -z "$GH_TOKEN" ]]; then
-  read -rsp "GitHub Personal Access Token（输入不显示）: " GH_TOKEN
+  read -rsp "GitHub Personal Access Token（仅用于创建仓库，输入不显示）: " GH_TOKEN
   echo ""
 fi
-[[ -z "$GH_TOKEN" ]] && error "Token 不能为空。"
+[[ -z "$GH_TOKEN" ]] && error "Token 不能为空（需要用于调用 GitHub API 创建仓库）。"
 
 # 验证 Token，同时获取用户名
 info "正在验证 Token..."
@@ -79,9 +93,9 @@ echo ""
 info "即将发布：github.com/$GH_USER/$REPO_NAME（$VIS_LABEL）"
 read -rp "确认继续？[Y/n]: " CONFIRM
 [[ "${CONFIRM:-Y}" =~ ^[Nn] ]] && { info "已取消。"; exit 0; }
+echo ""
 
 # ── Step 1：初始化 git ─────────────────────────────────────────────────────────
-echo ""
 if [[ ! -d ".git" ]]; then
   info "初始化 git 仓库..."
   git init
@@ -133,7 +147,7 @@ skills/users/*
 .DS_Store
 EOF
 
-# ── Step 3：为运行时目录创建 .gitkeep（保留空目录结构）─────────────────────────
+# ── Step 3：为运行时目录创建 .gitkeep ─────────────────────────────────────────
 info "创建空目录占位文件（.gitkeep）..."
 for DIR in bin data run uploads output logs skills/users; do
   mkdir -p "$DIR"
@@ -181,7 +195,6 @@ if [[ -n "$REPO_URL" ]]; then
   success "仓库已创建：$REPO_URL"
 elif echo "$REPO_ERR" | grep -q "already exists"; then
   warn "仓库已存在，将直接推送到已有仓库。"
-  REPO_URL="https://github.com/$GH_USER/$REPO_NAME"
 else
   error "创建仓库失败：$REPO_ERR"
 fi
@@ -193,7 +206,7 @@ if [[ -f "README.md" ]]; then
   git add README.md
 fi
 
-# ── Step 7：提交并推送 ────────────────────────────────────────────────────────
+# ── Step 7：提交并以 SSH 推送 ─────────────────────────────────────────────────
 info "提交代码..."
 git config user.name  "$GH_USER"
 git config user.email "${GH_USER}@users.noreply.github.com"
@@ -207,15 +220,15 @@ else
   info "没有需要提交的变更，跳过 commit。"
 fi
 
-REMOTE_URL="https://${GH_USER}:${GH_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git"
-
+# 使用 SSH URL，push 无需 Token
+SSH_REMOTE="git@github.com:${GH_USER}/${REPO_NAME}.git"
 if git remote get-url origin >/dev/null 2>&1; then
-  git remote set-url origin "$REMOTE_URL"
+  git remote set-url origin "$SSH_REMOTE"
 else
-  git remote add origin "$REMOTE_URL"
+  git remote add origin "$SSH_REMOTE"
 fi
 
-info "推送到 GitHub..."
+info "推送到 GitHub（SSH）..."
 git branch -M main
 git push -u origin main
 
@@ -223,9 +236,5 @@ git push -u origin main
 echo ""
 echo "═══════════════════════════════════════"
 success "发布完成！"
-echo ""
 echo "  仓库地址：https://github.com/$GH_USER/$REPO_NAME"
-echo ""
-echo "  ⚠️  提醒：Token 已用完毕，建议立即吊销并重新生成："
-echo "     https://github.com/settings/tokens"
 echo "═══════════════════════════════════════"
