@@ -7,15 +7,19 @@
 # scripts/publish.sh — 将 OTTClaw 发布到 GitHub
 #
 # 用法：
-#   bash scripts/publish.sh
+#   bash scripts/publish.sh <token> [仓库名] [public|private]
+#   GH_TOKEN=xxx bash scripts/publish.sh
+#   GH_TOKEN=xxx REPO_NAME=OTTClaw REPO_VISIBILITY=public bash scripts/publish.sh
 #
-# 脚本会交互式询问 GitHub Token、仓库名称和可见性，
+# 参数优先级：命令行参数 > 环境变量 > 交互式输入
+#
 # 完成以下操作：
 #   1. 初始化本地 git 仓库（如尚未初始化）
 #   2. 写入 .gitignore（排除运行时数据、个人配置等）
-#   3. 用 config/bootstrap/ 模板替换 git index 中的个人配置文件
-#   4. 通过 GitHub API 创建远程仓库
-#   5. 提交并推送所有代码
+#   3. 为运行时目录创建 .gitkeep（保留空目录结构）
+#   4. 用 config/bootstrap/ 模板替换 git index 中的个人配置文件
+#   5. 通过 GitHub API 创建远程仓库
+#   6. 提交并推送所有代码
 
 set -euo pipefail
 
@@ -31,22 +35,27 @@ warn()    { echo -e "${YELLOW}[publish]${NC} $*"; }
 error()   { echo -e "${RED}[publish]${NC} $*" >&2; exit 1; }
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
-command -v git  >/dev/null 2>&1 || error "未找到 git，请先安装。"
-command -v curl >/dev/null 2>&1 || error "未找到 curl，请先安装。"
+command -v git    >/dev/null 2>&1 || error "未找到 git，请先安装。"
+command -v curl   >/dev/null 2>&1 || error "未找到 curl，请先安装。"
+command -v python3 >/dev/null 2>&1 || error "未找到 python3，请先安装。"
 
-# ── 交互式输入 ────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════"
 echo "       OTTClaw → GitHub 发布工具"
 echo "═══════════════════════════════════════"
 echo ""
 
-# GitHub Personal Access Token
-read -rsp "GitHub Personal Access Token（输入不显示）: " GH_TOKEN
-echo ""
+# ── 读取参数（命令行 > 环境变量 > 交互输入）──────────────────────────────────
+
+# Token
+GH_TOKEN="${1:-${GH_TOKEN:-}}"
+if [[ -z "$GH_TOKEN" ]]; then
+  read -rsp "GitHub Personal Access Token（输入不显示）: " GH_TOKEN
+  echo ""
+fi
 [[ -z "$GH_TOKEN" ]] && error "Token 不能为空。"
 
-# 从 Token 获取用户名
+# 验证 Token，同时获取用户名
 info "正在验证 Token..."
 GH_USER=$(curl -sf -H "Authorization: token $GH_TOKEN" https://api.github.com/user \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null) \
@@ -54,21 +63,17 @@ GH_USER=$(curl -sf -H "Authorization: token $GH_TOKEN" https://api.github.com/us
 success "已验证，用户名：$GH_USER"
 
 # 仓库名称
-read -rp "仓库名称 [默认: OTTClaw]: " REPO_NAME
-REPO_NAME="${REPO_NAME:-OTTClaw}"
+REPO_NAME="${2:-${REPO_NAME:-OTTClaw}}"
+info "仓库名称：$REPO_NAME"
 
 # 可见性
-echo "仓库可见性："
-echo "  1) public（公开）"
-echo "  2) private（私有）"
-read -rp "请选择 [默认: 1]: " VIS_CHOICE
-if [[ "${VIS_CHOICE:-1}" == "2" ]]; then
-  REPO_PRIVATE="true"
-  VIS_LABEL="private"
+_VIS="${3:-${REPO_VISIBILITY:-public}}"
+if [[ "$_VIS" == "private" ]]; then
+  REPO_PRIVATE="true"; VIS_LABEL="private"
 else
-  REPO_PRIVATE="false"
-  VIS_LABEL="public"
+  REPO_PRIVATE="false"; VIS_LABEL="public"
 fi
+info "可见性：$VIS_LABEL"
 
 echo ""
 info "即将发布：github.com/$GH_USER/$REPO_NAME（$VIS_LABEL）"
@@ -133,7 +138,6 @@ info "创建空目录占位文件（.gitkeep）..."
 for DIR in bin data run uploads output logs skills/users; do
   mkdir -p "$DIR"
   touch "$DIR/.gitkeep"
-  # 若已被追踪的旧内容存在，先清除
   git rm -r --cached "$DIR/" 2>/dev/null || true
   git add "$DIR/.gitkeep"
   success "  $DIR/.gitkeep"
@@ -141,21 +145,15 @@ done
 
 # ── Step 4：用 bootstrap 模板替换个人配置文件 ─────────────────────────────────
 info "将 config/bootstrap/ 模板写入 git index..."
-
-# 先全量 stage，再对个人配置文件做替换
 git add .
 
 for FILE in ROLE.md app.json; do
   BOOTSTRAP="config/bootstrap/$FILE"
   TARGET="config/$FILE"
   if [[ -f "$BOOTSTRAP" ]]; then
-    # 将 bootstrap 版本写入 object store，获取 hash
     HASH=$(git hash-object -w "$BOOTSTRAP")
-    # 从 index 移除个人版本（不动磁盘文件）
     git rm --cached "$TARGET" 2>/dev/null || true
-    # 以 bootstrap 内容注册到 index 中的 config/ 路径
     git update-index --add --cacheinfo "100644,$HASH,$TARGET"
-    # 本地文件标记为 skip-worktree，避免被 git 标记为"已修改"
     git update-index --skip-worktree "$TARGET"
     success "  $TARGET → 使用 bootstrap 模板"
   else
@@ -163,7 +161,6 @@ for FILE in ROLE.md app.json; do
   fi
 done
 
-# 重新 stage（确保其他文件都已加入）
 git add .
 
 # ── Step 5：创建 GitHub 仓库 ───────────────────────────────────────────────────
@@ -191,7 +188,6 @@ fi
 
 # ── Step 6：更新 README 中的仓库链接 ──────────────────────────────────────────
 if [[ -f "README.md" ]]; then
-  # 替换 clone URL 占位
   sed -i.bak "s|https://github.com/your-org/$REPO_NAME|https://github.com/$GH_USER/$REPO_NAME|g" README.md
   rm -f README.md.bak
   git add README.md
