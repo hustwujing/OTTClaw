@@ -31,11 +31,6 @@ client/.venv/
 skills/users/*
 !skills/users/.gitkeep
 
-# 本地脚本（个人工作流，不入库）
-scripts/build.sh
-scripts/client.sh
-scripts/publish.sh
-
 # Claude Code 工作目录
 .claude/
 
