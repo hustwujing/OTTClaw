@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-[OpenClaw](https://github.com/openclaw/openclaw) 是一款强大的本地 AI Agent 工具，但它只能在本地单机运行，**一套环境只能一个人用**。团队场景下，每人都要自己部署、维护配置、自己接入 LLM API、自己安装依赖——重复成本极高，尤其对非技术工种而言，更是地域噩梦。
+[OpenClaw](https://github.com/openclaw/openclaw) 是一款强大的本地 AI Agent 工具，但它只能在本地单机运行，**一套环境只能一个人用**。团队场景下，每人都要自己部署、维护配置、自己接入 LLM API、自己安装依赖——重复成本极高，尤其对非技术工种而言，更是地狱噩梦。
 
 **OTTClaw 解决的正是这个问题。** 管理员在服务器上部署一次，通过邀请码分发访问权限；团队成员打开浏览器即可使用完整的 Agent 能力，无需安装任何本地依赖。每位成员的会话历史、浏览器登录态、生成文件**完全隔离**，互不干扰。在此基础上，进行二次开发，接入内部数据，即可达到让全员vibe办公的境界，让办公效率倍速提升。
 
