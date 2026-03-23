@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"OTTClaw/config"
 )
@@ -83,7 +82,7 @@ func newAnthropicClientFromEndpoint(ep config.LLMEndpointConfig) *anthropicClien
 	}
 	return &anthropicClient{
 		httpClient: &http.Client{
-			Timeout:   120 * time.Second,
+			Timeout:   0, // 流式请求不设 HTTP 层超时，依赖 ctx 取消；固定 120s 会在 thinking 阶段把连接强杀
 			Transport: streamTransport(),
 		},
 		apiKey:    ep.APIKey,
@@ -146,6 +145,8 @@ func (c *anthropicClient) ChatStream(ctx context.Context, messages []ChatMessage
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+	httpReq.Header.Set("X-Accel-Buffering", "no")
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
@@ -345,6 +346,8 @@ func convertToAnthropicTools(tools []Tool) []anthropicTool {
 // parseAnthropicStream 解析 Anthropic SSE 流，将文本 delta 和工具调用发送到 channel
 func parseAnthropicStream(ctx context.Context, r io.Reader, events chan<- StreamEvent) {
 	scanner := bufio.NewScanner(r)
+	// 单行上限扩大到 1 MB，防止工具调用参数过长时 Scanner 报 "token too long"
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	type partialToolBlock struct {
 		ID       string

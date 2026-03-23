@@ -139,7 +139,7 @@ func SyncToolRequestStatus() error {
 // userID/sessionID 用于数据库记录与日志追踪
 func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, writer StreamWriter) error {
 	start := time.Now()
-	logger.Info("agent", userID, sessionID, "agent 循环启动", 0)
+	logger.Debug("agent", userID, sessionID, "agent 循环启动", 0)
 
 	// 注入 ProgressSender：LLM 调用 notify(action=progress) 工具时触达，决定何时/推送什么
 	ctx = tool.WithProgressSender(ctx, func(message string) error {
@@ -272,7 +272,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
 		if !hasCompressed {
 			if estToks := estimateTokens(messages); estToks > config.Cfg.MaxContextTokens {
-				logger.Info("agent", userID, sessionID,
+				logger.Debug("agent", userID, sessionID,
 					fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d",
 						estToks, config.Cfg.MaxContextTokens), 0)
 				// 预检：历史消息 > keepRecent 才会真正压缩，才值得推送 compress_start。
@@ -287,7 +287,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				} else if didCompress {
 					messages = compressed
 					hasCompressed = true
-					logger.Info("agent", userID, sessionID,
+					logger.Debug("agent", userID, sessionID,
 						fmt.Sprintf("context compressed new_tokens=%d", estimateTokens(messages)), 0)
 					_ = writer.WriteProgress("compress_done", "理清楚了，咱们继续…", time.Since(start).Milliseconds())
 				}
@@ -303,9 +303,12 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				totalLen += len(p.Text) + len(p.Data)/4*3 // base64 还原字节数估算
 			}
 		}
-		logger.Info("llm", userID, sessionID,
-			fmt.Sprintf("llm call iter=%d model=%s msgs=%d total_chars=%d est_tokens=%d",
-				iter, config.Cfg.LLMModel, len(messages), totalLen, totalLen/3), 0)
+		if iter == 0 {
+			logger.Info("llm", userID, sessionID, ">>> "+logUserInput(userInput), 0)
+		}
+		logger.Debug("llm", userID, sessionID,
+			fmt.Sprintf("llm call iter=%d model=%s msgs=%d est_tokens=%d",
+				iter, config.Cfg.LLMModel, len(messages), totalLen/3), 0)
 
 		// DEBUG：记录完整的 LLM 输入（messages + tools）
 		if data, err := json.Marshal(map[string]any{"messages": messages, "tools": tools}); err == nil {
@@ -376,7 +379,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			if iter == 1 {
 				inputSuffix = "  | " + logUserInput(userInput)
 			}
-			logger.Info("llm", userID, sessionID,
+			logger.Debug("llm", userID, sessionID,
 				fmt.Sprintf(
 					"llm用量 第%d轮 输入=%d 输出=%d 合计=%d"+
 						"  ~系统=%d(角色~%d 技能~%d KV~%d 其他~%d) ~工具=%d ~历史=%d ~用户=%d%s",
@@ -400,7 +403,10 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			return streamErr
 		}
 
-		logger.Info("llm", userID, sessionID,
+		if replyText := textBuf.String(); replyText != "" {
+			logger.Info("llm", userID, sessionID, "<<< "+truncate(replyText, 120), 0)
+		}
+		logger.Debug("llm", userID, sessionID,
 			fmt.Sprintf("llm call done iter=%d tool_calls=%d cost=%dms",
 				iter, len(toolCalls), time.Since(iterStart).Milliseconds()), 0)
 
@@ -437,7 +443,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			go func(text string) { _ = storage.AddOriginMessage(userID, sessionID, "assistant", text, nil) }(assistantText)
 			// 异步：在第 3 轮对话完成后生成会话 AI 标题
 			go a.maybeGenerateTitle(sessionID)
-			logger.Info("agent", userID, sessionID,
+			logger.Debug("agent", userID, sessionID,
 				fmt.Sprintf("agent loop end: normal answer, total_iter=%d cost=%dms",
 					iter+1, time.Since(start).Milliseconds()), 0)
 			_ = writer.WriteEnd()
@@ -485,7 +491,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		// 执行每个工具调用
 		for _, tc := range toolCalls {
 			toolStart := time.Now()
-			logger.Info("tool", userID, sessionID,
+			logger.Debug("tool", userID, sessionID,
 				fmt.Sprintf("executing tool=%s", tc.Function.Name), 0)
 
 			// 向前端推送"工具调用开始"（跳过纯 UI 工具）
@@ -592,7 +598,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					fmt.Sprintf("%s • %s • %dms", tc.Function.Name, truncate(toolErr.Error(), config.Cfg.ToolErrorSummaryLen), costMs),
 					time.Since(start).Milliseconds())
 			} else {
-				logger.Info("tool", userID, sessionID,
+				logger.Debug("tool", userID, sessionID,
 					fmt.Sprintf("tool %q done result_len=%d cost=%dms",
 						tc.Function.Name, len(dbContent), costMs), 0)
 				_ = writer.WriteProgress("tool_done",

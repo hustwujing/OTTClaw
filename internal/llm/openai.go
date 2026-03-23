@@ -17,8 +17,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"OTTClaw/config"
 )
@@ -115,18 +113,17 @@ type openAIChunk struct {
 // ----- openAIClient 实现 -----
 
 type openAIClient struct {
-	httpClient           *http.Client
-	baseURL              string
-	apiKey               string
-	model                string
-	maxTokens            int
-	disableStreamOptions atomic.Bool // 首次遭遇代理不支持 stream_options 的 500 后置 true，本会话内持续生效
+	httpClient *http.Client
+	baseURL    string
+	apiKey     string
+	model      string
+	maxTokens  int
 }
 
 func newOpenAIClientFromEndpoint(ep config.LLMEndpointConfig) *openAIClient {
 	return &openAIClient{
 		httpClient: &http.Client{
-			Timeout:   120 * time.Second,
+			Timeout:   0, // 流式请求不设 HTTP 层超时，依赖 ctx 取消；固定 120s 会在 thinking 阶段把连接强杀
 			Transport: streamTransport(),
 		},
 		baseURL:   ep.BaseURL,
@@ -160,21 +157,11 @@ func (c *openAIClient) ChatSync(ctx context.Context, messages []ChatMessage) (st
 }
 
 // ChatStream 发起流式请求，返回事件 channel。
-// 若 API 代理因不支持 stream_options 而返回特定 500 错误，
-// 则自动去掉 stream_options 重试一次，并在本会话内不再携带该字段。
+// stream_options 默认关闭：部分代理（如 bilibili llmapi）会静默接受该字段，
+// 但为了计算 token 用量会缓冲整个响应，导致"出几个字→卡住→全量倾泻"。
+// 若将来需要 usage 统计，可改为 true 并确认目标代理的流式行为。
 func (c *openAIClient) ChatStream(ctx context.Context, messages []ChatMessage, tools []Tool) (<-chan StreamEvent, error) {
-	withOpts := !c.disableStreamOptions.Load()
-	events, err := c.doStream(ctx, messages, tools, withOpts)
-	if err != nil && withOpts && isStreamOptionsUnsupported(err) {
-		c.disableStreamOptions.Store(true)
-		events, err = c.doStream(ctx, messages, tools, false)
-	}
-	return events, err
-}
-
-// isStreamOptionsUnsupported 判断错误是否由代理不支持 stream_options 引起
-func isStreamOptionsUnsupported(err error) bool {
-	return strings.Contains(err.Error(), "expected stream response")
+	return c.doStream(ctx, messages, tools, false)
 }
 
 // doStream 实际发起一次流式 HTTP 请求
@@ -206,6 +193,8 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+	httpReq.Header.Set("X-Accel-Buffering", "no")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -231,6 +220,8 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 // parseOpenAIStream 逐行读取 SSE 流，累积 tool_calls，将 text delta 和最终 tool_calls 发送到 channel
 func parseOpenAIStream(ctx context.Context, r io.Reader, events chan<- StreamEvent) {
 	scanner := bufio.NewScanner(r)
+	// 单行上限扩大到 1 MB，防止工具调用参数过长时 Scanner 报 "token too long"
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	type partialCall struct {
 		ID       string

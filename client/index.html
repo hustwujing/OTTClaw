@@ -1430,10 +1430,18 @@ function renderMD(bubble, text) {
   }
   const ia = bubble.querySelector('.ia-wrap');
   const processed = preMarkdown(text);
-  tc.innerHTML = window.marked
+  const html = window.marked
     ? marked.parse(processed)
     : escHtml(text).replace(/\n/g, '<br>');
+  // 先瞬间隐藏（无动画），替换内容后再淡入，消除流式纯文本→markdown 的跳变感
+  tc.style.transition = 'none';
+  tc.style.opacity = '0';
+  tc.innerHTML = html;
   if (ia) bubble.appendChild(ia);
+  requestAnimationFrame(() => {
+    tc.style.transition = 'opacity 0.18s';
+    tc.style.opacity = '1';
+  });
 }
 
 function rmTyping(bubble) { bubble.querySelector('.typing')?.remove(); }
