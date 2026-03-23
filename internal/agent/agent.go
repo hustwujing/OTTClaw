@@ -996,13 +996,9 @@ func extractRoleName(roleMD string) string {
 }
 
 // appendFileHints 扫描 userInput 中的 [文件: path] 占位符，
-// 对磁盘大小超过 UploadHintMinBytes 阈值的文件，在末尾追加工具调用提示。
+// 对所有能 stat 到的文件追加按扩展名匹配的工具调用提示，引导 LLM 选用正确工具。
 // 仅用于写入 DB；origin_session_messages 仍保留原始 userInput 用于前端展示。
 func appendFileHints(content string) string {
-	threshold := config.Cfg.UploadHintMinBytes
-	if threshold <= 0 {
-		return content
-	}
 	const marker = "[文件: "
 	var hints []string
 	s := content
@@ -1025,9 +1021,8 @@ func appendFileHints(content string) string {
 		if path == "" {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil || info.Size() <= int64(threshold) {
-			continue
+		if _, err := os.Stat(path); err != nil {
+			continue // 文件不存在则跳过
 		}
 		hints = append(hints, buildFileHint(path))
 	}

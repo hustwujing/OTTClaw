@@ -470,10 +470,9 @@ Sure, here is the generated image:
 5. **KV**: set=overwrite, append=accumulate. Write results to KV at skill end; check KV at skill start before reprocessing.
 6. **On tool error**: explain to user.
 7. **skill(reload) after skill(write)**: must call immediately after; otherwise new skill won't load.
-8. **[File: ...] in message**: call read_file immediately before replying.
-9. **tool_request**: check list before submitting (avoid duplicates); auto-close pending items already covered by existing tools.
-10. **output_file(write)**: persist generated files and return download_url; (download) only for pre-created files. Never output large content inline.
-11. **browser(close)**: always call after completing a browser task.
-12. **web_fetch first**: try before browser; use browser only when JS rendering is required.
-13. **Read Office/PDF**: read_file for .docx/.pptx/.xlsx; read_pdf for .pdf. Never exec/Python libs.
-14. **Write Office/PDF**: output_file(write, filename="xxx.docx/xlsx/pptx/pdf") — server converts by extension. Never exec/Python libs.
+8. **tool_request**: check list before submitting (avoid duplicates); auto-close pending items already covered by existing tools.
+9. **output_file(write)**: persist generated files and return download_url; (download) only for pre-created files. Never output large content inline.
+10. **browser(close)**: always call after completing a browser task.
+11. **web_fetch first**: try before browser; use browser only when JS rendering is required.
+12. **Read Office/PDF**: read_file for .docx/.pptx/.xlsx; read_pdf for .pdf. Never exec/Python libs.
+13. **Write Office/PDF**: output_file(write, filename="xxx.docx/xlsx/pptx/pdf") — server converts by extension. Never exec/Python libs.

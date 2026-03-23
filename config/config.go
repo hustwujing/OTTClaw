@@ -116,9 +116,6 @@ type AppConfig struct {
 	// 工具结果 DB 截断
 	ToolResultMaxDBBytes int // TOOL_RESULT_MAX_DB_BYTES：工具结果写入 DB 的最大字节数，超出时截断并追加提示；0 不截断，默认 2000
 
-	// 上传文件工具提示阈值
-	UploadHintMinBytes int // UPLOAD_HINT_MIN_BYTES：用户消息中 [文件: path] 附件超过此字节数时，在 DB 写入时追加工具调用提示；0 不追加，默认 10240（10 KB）
-
 	// 工具失败进度摘要截断
 	ToolErrorSummaryLen int // TOOL_ERROR_SUMMARY_LEN：工具调用失败时推送给前端的错误摘要最大字符数（rune），默认 32
 
@@ -227,7 +224,6 @@ func loadConfig() *AppConfig {
 		WeComWebhookTimeoutSec:  getEnvInt("WECOM_WEBHOOK_TIMEOUT_SEC", 10),
 		DownloadTTLMin:          getEnvInt("DOWNLOAD_TTL_MIN", 30),
 		ToolResultMaxDBBytes:    getEnvInt("TOOL_RESULT_MAX_DB_BYTES", 2000),
-		UploadHintMinBytes:      getEnvInt("UPLOAD_HINT_MIN_BYTES", 10*1024),
 		ToolErrorSummaryLen:     getEnvInt("TOOL_ERROR_SUMMARY_LEN", 32),
 		FsReadMaxBytes:          getEnvInt("FS_READ_MAX_BYTES", 512*1024),
 		UploadMaxBytes:          getEnvInt("UPLOAD_MAX_BYTES", 20*1024*1024),
