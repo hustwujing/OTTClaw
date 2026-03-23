@@ -1099,7 +1099,14 @@ async function streamSSE(message, bubble, signal) {
             if (!chunk) break;
             rmTyping(bubble);
             textBuf += chunk;
-            appendStreamChunk(bubble, chunk); // O(1) 文本节点追加
+            // RAF 节流：每帧最多 markdown 渲染一次，避免流式空白行
+            if (!renderScheduled) {
+              renderScheduled = true;
+              requestAnimationFrame(() => {
+                renderMDLive(bubble, textBuf);
+                renderScheduled = false;
+              });
+            }
             scrollEnd();
             await yieldToMain(); // 让出主线程，给浏览器一次绘制机会，避免多 chunk 批量刷出
             break;
@@ -1460,9 +1467,9 @@ function yieldToMain() {
   });
 }
 
-// appendStreamChunk: 将 chunk 以文本节点追加到 bubble 的流式容器（O(1)）。
-// 在流式阶段调用，end 事件时再由 renderMD 统一替换为 markdown 渲染结果。
-function appendStreamChunk(bubble, chunk) {
+// renderMDLive: 流式阶段用 marked 实时渲染 markdown（无 fade 动画）。
+// 调用方通过 requestAnimationFrame 节流，每帧最多渲染一次，避免空白行问题。
+function renderMDLive(bubble, text) {
   let tc = bubble.querySelector('.bubble-text');
   if (!tc) {
     tc = document.createElement('div');
@@ -1471,15 +1478,11 @@ function appendStreamChunk(bubble, chunk) {
     procLog ? procLog.insertAdjacentElement('afterend', tc)
             : bubble.insertBefore(tc, bubble.firstChild);
   }
-  let streamEl = tc.querySelector('.stream-raw');
-  if (!streamEl) {
-    tc.innerHTML = '';
-    streamEl = document.createElement('span');
-    streamEl.className = 'stream-raw';
-    streamEl.style.cssText = 'white-space:pre-wrap;word-break:break-word;';
-    tc.appendChild(streamEl);
-  }
-  streamEl.appendChild(document.createTextNode(chunk));
+  const processed = preMarkdown(text);
+  const html = window.marked
+    ? marked.parse(processed)
+    : escHtml(text).replace(/\n/g, '<br>');
+  tc.innerHTML = html;
 }
 
 // ── Server-initiated push (cron) ─────────────────────────────────────────
@@ -1489,7 +1492,7 @@ function subscribeNotify(sessionId) {
   const url = `${S.url}/api/notify?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(S.token)}`;
   const es = new EventSource(url);
   S.notifySource = es;
-  let bubble = null, textBuf = '';
+  let bubble = null, textBuf = '', renderScheduled = false;
   es.onmessage = function(e) {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
@@ -1497,14 +1500,21 @@ function subscribeNotify(sessionId) {
       case 'cron_start':
         addUserBubble('\u23f0 ' + (ev.content || ''));
         bubble = addAIBubble().bubble;
-        textBuf = '';
+        textBuf = ''; renderScheduled = false;
         scrollEnd();
         break;
       case 'text':
         if (!bubble) break;
         rmTyping(bubble);
         textBuf += (ev.content || '');
-        appendStreamChunk(bubble, ev.content || '');
+        if (!renderScheduled) {
+          renderScheduled = true;
+          const _b = bubble;
+          requestAnimationFrame(() => {
+            renderMDLive(_b, textBuf);
+            renderScheduled = false;
+          });
+        }
         scrollEnd();
         break;
       case 'progress':

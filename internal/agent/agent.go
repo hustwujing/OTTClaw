@@ -135,64 +135,24 @@ func SyncToolRequestStatus() error {
 	return singleton.toolExec.SyncToolRequests()
 }
 
+// pendingToolCall 记录已写入 DB 但尚未有对应 tool_result 的工具调用，
+// 用于优雅退出时补写 synthetic error result。
+type pendingToolCall struct{ id, name string }
+
 // Run 处理用户输入，执行 LLM 循环，将最终回答流式写入 writer
 // userID/sessionID 用于数据库记录与日志追踪
 func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, writer StreamWriter) error {
 	start := time.Now()
 	logger.Debug("agent", userID, sessionID, "agent 循环启动", 0)
 
-	// 注入 ProgressSender：LLM 调用 notify(action=progress) 工具时触达，决定何时/推送什么
-	ctx = tool.WithProgressSender(ctx, func(message string) error {
-		return writer.WriteProgress(config.Cfg.ProgressLabel, message, time.Since(start).Milliseconds())
-	})
-	// 注入 InteractiveSender：LLM 调用 notify(action=options/confirm) 工具时触达
-	ctx = tool.WithInteractiveSender(ctx, func(kind string, data any) error {
-		return writer.WriteInteractive(kind, data)
-	})
-	// 注入 sessionID：kv_get / kv_set 工具读写会话 KV 时使用
-	ctx = tool.WithSessionID(ctx, sessionID)
-	// 注入 userID：get_current_user 工具读取时使用
-	ctx = tool.WithUserID(ctx, userID)
-	// 注入 sessionID 到 mcp context：stdio server 按 session 创建独立子进程，会话结束自动回收
-	ctx = mcp.WithSessionID(ctx, sessionID)
+	ctx = a.setupContext(ctx, userID, sessionID, writer, start)
 	defer mcp.Global.CloseSession(sessionID)
-	// 注入 SpeakerSender：skill(action=load) 工具调用时，将技能的 display_name 推送给前端
-	ctx = tool.WithSpeakerSender(ctx, func(name string) error {
-		return writer.WriteSpeaker(name)
-	})
-
-	// 注入 RoleUpdater：update_role_md 工具调用时，写文件并热更新 singleton.roleMD
-	// 同时向前端推送新角色名，使 speaker 随角色切换而重置
-	ctx = tool.WithRoleUpdater(ctx, func(newContent string) error {
-		if err := os.WriteFile(config.Cfg.RoleMDPath, []byte(newContent), 0o644); err != nil {
-			return fmt.Errorf("write ROLE.md: %w", err)
-		}
-		a.setRoleMD(newContent)
-		_ = writer.WriteSpeaker(extractRoleName(newContent))
-		return nil
-	})
-
-	// 注入 MemoryCompressor：update_user_memory 工具超限时调用 LLM 压缩记忆
-	ctx = tool.WithMemoryCompressor(ctx, func(innerCtx context.Context, text string, maxChars int) (string, error) {
-		prompt := fmt.Sprintf(
-			"请将以下用户记忆信息压缩到 %d 字符以内，保留最重要的信息，删除冗余和重复内容，输出纯文本（不要加任何解释）：\n\n%s",
-			maxChars, text,
-		)
-		compressed, err := a.llmClient.ChatSync(innerCtx, []llm.ChatMessage{
-			{Role: "user", Content: prompt},
-		})
-		if err != nil {
-			return "", err
-		}
-		return compressed, nil
-	})
 
 	// ── 优雅退出保护 ───────────────────────────────────────────────────────────────
 	// 追踪已写入 DB 但尚未有对应 tool_result 的 semantic tool calls。
 	// 若 Run() 在工具执行期间因崩溃/超时/context 取消而退出，
 	// defer 自动补写 synthetic error tool_result，保持 DB 中 tool_use/tool_result 严格配对，
 	// 避免会话因孤立 tool_use 永久损坏（Anthropic 400 "tool_use without tool_result"）。
-	type pendingToolCall struct{ id, name string }
 	var pendingCalls []pendingToolCall // 单 goroutine 顺序执行，无需锁
 	defer func() {
 		if len(pendingCalls) == 0 {
@@ -209,61 +169,15 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		}
 	}()
 
-	// 1. 将用户消息持久化到数据库
-	// dbUserInput：对超阈值文件追加工具调用提示，引导 LLM 主动读取文件内容；
-	// origin_session_messages 仍保留原始 userInput，不影响前端展示。
-	dbUserInput := appendFileHints(userInput)
-	if err := storage.AddMessage(userID, sessionID, "user", dbUserInput, "", "", ""); err != nil {
-		logger.Error("agent", userID, sessionID, "保存用户消息失败", err, 0)
-		return fmt.Errorf("save user message: %w", err)
-	}
-	go func() { _ = storage.AddOriginMessage(userID, sessionID, "user", userInput, nil) }()
-
-	// 2. 加载当前会话的历史消息（含刚保存的用户消息）
-	dbMsgs, err := storage.GetMessages(sessionID)
+	// 持久化用户消息、加载历史、构造 prompt 与 messages
+	state, err := a.initRun(userID, sessionID, userInput)
 	if err != nil {
-		logger.Error("agent", userID, sessionID, "加载历史消息失败", err, 0)
-		return fmt.Errorf("load messages: %w", err)
+		return err
 	}
-
-	// 3. 加载会话 KV 上下文
-	kv, err := storage.GetSessionKV(sessionID)
-	if err != nil {
-		logger.Warn("agent", userID, sessionID, "加载会话 KV 失败，使用空值", 0)
-		kv = map[string]interface{}{}
-	}
-
-	// 4. 构造系统 prompt（ROLE + TOOL + skill heads + KV + MCP）
-	systemPrompt, promptBD := a.buildSystemPrompt(userID, kv, userInput)
-
-	// 5. 将 DB 历史记录转换为 LLM messages 格式
-	messages := buildMessages(systemPrompt, dbMsgs)
-
-	// 6. 获取工具定义（含 notify）
-	tools := a.toolExec.ToolDefinitions()
-
-	// 预计算 tools / history / user message 字符数，供后续 usage 日志分析
-	toolsChars := 0
-	if toolsJSON, err := json.Marshal(tools); err == nil {
-		toolsChars = len(toolsJSON)
-	}
-	histChars, userChars := 0, 0
-	for i, m := range messages {
-		if i == 0 {
-			continue // messages[0] 是 system prompt，已由 promptBD 覆盖
-		}
-		chars := len(m.Content)
-		for _, tc := range m.ToolCalls {
-			if b, err := json.Marshal(tc); err == nil {
-				chars += len(b)
-			}
-		}
-		if i == len(messages)-1 && m.Role == "user" {
-			userChars = chars
-		} else {
-			histChars += chars
-		}
-	}
+	messages := state.messages
+	tools := state.tools
+	promptBD := state.promptBD
+	toolsChars, histChars, userChars := state.toolsChars, state.histChars, state.userChars
 
 	// LLM 循环：最多执行 N 轮，防止无限循环（AGENT_MAX_ITERATIONS，默认 20）
 	maxIterations := config.Cfg.AgentMaxIterations
@@ -504,82 +418,8 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				result = fmt.Sprintf("ERROR: %v", toolErr)
 			}
 
-			// 多模态工具结果（如 read_image）：in-memory 注入 Parts，DB 只存文字摘要；
-			// 普通工具：Content 直接使用原始字符串。
-			toolMsg := llm.ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name}
-			dbContent := result
-			if parts, textSummary, webURL, ok := tool.DecodePartsResult(result); ok {
-				toolMsg.Parts = parts
-				toolMsg.Content = textSummary // 文字回退，供不支持多模态 tool result 的 provider
-				dbContent = textSummary
-				// 有 Web URL 时推送给前端，前端内联渲染图片
-				if webURL != "" {
-					if imgErr := writer.WriteImage(webURL); imgErr != nil {
-						logger.Warn("agent", userID, sessionID, "WriteImage failed: "+imgErr.Error(), 0)
-					}
-				}
-			} else {
-				// 普通工具结果中若含 webUrl 字段（browser screenshot），自动推送给前端内联展示。
-				// 同时将整个工具结果替换为不含任何路径信息的纯确认消息，
-				// 防止 LLM 从 path / absolutePath 等字段反推出 URL 再嵌入回复文本（导致飞书/企微显示原始 markdown）。
-				if webURL := extractWebURL(result); webURL != "" {
-					localPath := extractLocalPath(result)
-					dlURL := extractDownloadURL(result)
-					if imgErr := writer.WriteImage(webURL); imgErr != nil {
-						logger.Warn("agent", userID, sessionID, "WriteImage failed: "+imgErr.Error(), 0)
-						result = fmt.Sprintf(`{"status":"error","message":"Image saved but delivery to channel failed: %s. Do NOT embed image markdown in text.","path":%q}`,
-							imgErr.Error(), localPath)
-					} else {
-						// 写入可见历史：assistant 生成的图片
-						go func(url, lpath string) {
-							att := storage.Attachment{
-								Type:     "image",
-								URL:      url,
-								Filename: filepath.Base(url),
-							}
-							if lpath != "" {
-								if info, statErr := os.Stat(lpath); statErr == nil {
-									att.Size = info.Size()
-								}
-							}
-							_ = storage.AddOriginMessage(userID, sessionID, "assistant", "", []storage.Attachment{att})
-						}(webURL, localPath)
-
-						if dlURL != "" {
-							// output_file 已生成下载 token，直接保留 download_url 供 LLM 按需展示
-							result = fmt.Sprintf(`{"status":"ok","message":"Image sent to channel automatically. Do NOT embed image markdown in text. If user requests a download link, use the download_url field.","download_url":%q}`,
-								dlURL)
-						} else if localPath != "" {
-							// 只有路径（如 nano_banana），告知 LLM 如需下载链接再调 output_file
-							result = fmt.Sprintf(`{"status":"ok","message":"Image sent to channel automatically. Do NOT embed image markdown in text. If user explicitly requests a download link, call output_file(action=download,file_path=<path>).","path":%q}`,
-								localPath)
-						} else {
-							result = `{"status":"ok","message":"Image sent to the user's channel automatically. Do NOT embed any URL or image markdown in your reply."}`
-						}
-					}
-					// dbContent 同步更新：防止原始含路径的结果存入 DB 后在后续对话轮次中被 LLM 读到，
-					// 导致 LLM 从历史记录中拼出图片路径并嵌入 ![...](url) 回复文本。
-					dbContent = result
-				} else if dlURL := extractDownloadURL(result); dlURL != "" {
-					// 非图片生成文件（PDF / Excel / zip 等）：只有 download_url，无 webUrl。
-					// 写入可见历史，供前端展示下载入口。
-					localPath := extractLocalPath(result)
-					go func(dlurl, lpath string) {
-						att := storage.Attachment{
-							Type:     "file",
-							URL:      dlurl,
-							Filename: filepath.Base(lpath),
-						}
-						if lpath != "" {
-							if info, statErr := os.Stat(lpath); statErr == nil {
-								att.Size = info.Size()
-							}
-						}
-						_ = storage.AddOriginMessage(userID, sessionID, "assistant", "", []storage.Attachment{att})
-					}(dlURL, localPath)
-				}
-				toolMsg.Content = result
-			}
+			// 处理工具结果（多模态/图片推送/下载链接记录）
+			toolMsg, dbContent := a.processToolResult(userID, sessionID, writer, tc, result)
 			// in-memory：所有工具结果都追加（本轮 LLM API 要求每个 tool_call 有对应 tool 回复）
 			messages = append(messages, toolMsg)
 
@@ -590,39 +430,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}
 
 			// 有语义的工具：写 DB + 记录详细日志 + 推送完成事件
-			costMs := time.Since(toolStart).Milliseconds()
-			if toolErr != nil {
-				logger.Error("tool", userID, sessionID,
-					fmt.Sprintf("tool %q failed", tc.Function.Name), toolErr, time.Since(toolStart))
-				_ = writer.WriteProgress("tool_error",
-					fmt.Sprintf("%s • %s • %dms", tc.Function.Name, truncate(toolErr.Error(), config.Cfg.ToolErrorSummaryLen), costMs),
-					time.Since(start).Milliseconds())
-			} else {
-				logger.Debug("tool", userID, sessionID,
-					fmt.Sprintf("tool %q done result_len=%d cost=%dms",
-						tc.Function.Name, len(dbContent), costMs), 0)
-				_ = writer.WriteProgress("tool_done",
-					fmt.Sprintf("%s • %dms", tc.Function.Name, costMs),
-					time.Since(start).Milliseconds())
-			}
-			// 超大工具结果：DB 只存重新获取提示，降低历史消息 token 占用；
-			// in-memory toolMsg.Content 仍保留完整结果，供本轮 LLM 正常使用。
-			if max := config.Cfg.ToolResultMaxDBBytes; max > 0 {
-				if len(dbContent) > max {
-					dbContent = buildReFetchHint(tc.Function.Name, tc.Function.Arguments, sessionID, dbContent)
-				}
-			}
-			if err := storage.AddMessage(userID, sessionID, "tool", dbContent, tc.ID, tc.Function.Name, ""); err != nil {
-				logger.Error("agent", userID, sessionID, "save tool result failed", err, 0)
-			} else {
-				// tool_result 已写入 DB，从 pending 移除（防止 defer 重复写）
-				for i, pc := range pendingCalls {
-					if pc.id == tc.ID {
-						pendingCalls = append(pendingCalls[:i], pendingCalls[i+1:]...)
-						break
-					}
-				}
-			}
+			a.persistToolResult(userID, sessionID, writer, tc, dbContent, toolErr, toolStart, start, &pendingCalls)
 		}
 		// 若本轮包含交互工具（notify action=options/confirm），立即结束循环。
 		// LLM 已通过交互工具表达了"等待用户决策"的意图，
@@ -649,6 +457,227 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	_ = writer.WriteText(friendlyMsg)
 	_ = writer.WriteEnd()
 	return overLimitErr
+}
+
+// setupContext 将所有工具所需的上下文信息注入 ctx，返回新的 ctx。
+// 每次 Run() 调用时执行一次，避免 Run 函数头部堆砌大量闭包。
+func (a *Agent) setupContext(ctx context.Context, userID, sessionID string, writer StreamWriter, start time.Time) context.Context {
+	ctx = tool.WithProgressSender(ctx, func(message string) error {
+		return writer.WriteProgress(config.Cfg.ProgressLabel, message, time.Since(start).Milliseconds())
+	})
+	ctx = tool.WithInteractiveSender(ctx, func(kind string, data any) error {
+		return writer.WriteInteractive(kind, data)
+	})
+	ctx = tool.WithSessionID(ctx, sessionID)
+	ctx = tool.WithUserID(ctx, userID)
+	ctx = mcp.WithSessionID(ctx, sessionID)
+	ctx = tool.WithSpeakerSender(ctx, func(name string) error {
+		return writer.WriteSpeaker(name)
+	})
+	ctx = tool.WithRoleUpdater(ctx, func(newContent string) error {
+		if err := os.WriteFile(config.Cfg.RoleMDPath, []byte(newContent), 0o644); err != nil {
+			return fmt.Errorf("write ROLE.md: %w", err)
+		}
+		a.setRoleMD(newContent)
+		_ = writer.WriteSpeaker(extractRoleName(newContent))
+		return nil
+	})
+	ctx = tool.WithMemoryCompressor(ctx, func(innerCtx context.Context, text string, maxChars int) (string, error) {
+		prompt := fmt.Sprintf(
+			"请将以下用户记忆信息压缩到 %d 字符以内，保留最重要的信息，删除冗余和重复内容，输出纯文本（不要加任何解释）：\n\n%s",
+			maxChars, text,
+		)
+		compressed, err := a.llmClient.ChatSync(innerCtx, []llm.ChatMessage{
+			{Role: "user", Content: prompt},
+		})
+		if err != nil {
+			return "", err
+		}
+		return compressed, nil
+	})
+	return ctx
+}
+
+// runState 保存 initRun 初始化阶段的输出，供 Run 主循环使用。
+type runState struct {
+	messages   []llm.ChatMessage
+	tools      []llm.Tool
+	promptBD   promptBreakdown
+	toolsChars int
+	histChars  int
+	userChars  int
+}
+
+// initRun 执行 Run 前的初始化：持久化用户消息、加载历史与 KV、
+// 构造系统 prompt 和 messages、预计算字符统计。
+func (a *Agent) initRun(userID, sessionID, userInput string) (*runState, error) {
+	// 1. 持久化用户消息（dbUserInput：追加文件工具提示，引导 LLM 主动读取文件内容）
+	dbUserInput := appendFileHints(userInput)
+	if err := storage.AddMessage(userID, sessionID, "user", dbUserInput, "", "", ""); err != nil {
+		logger.Error("agent", userID, sessionID, "保存用户消息失败", err, 0)
+		return nil, fmt.Errorf("save user message: %w", err)
+	}
+	go func() { _ = storage.AddOriginMessage(userID, sessionID, "user", userInput, nil) }()
+
+	// 2. 加载历史消息
+	dbMsgs, err := storage.GetMessages(sessionID)
+	if err != nil {
+		logger.Error("agent", userID, sessionID, "加载历史消息失败", err, 0)
+		return nil, fmt.Errorf("load messages: %w", err)
+	}
+
+	// 3. 加载会话 KV 上下文
+	kv, err := storage.GetSessionKV(sessionID)
+	if err != nil {
+		logger.Warn("agent", userID, sessionID, "加载会话 KV 失败，使用空值", 0)
+		kv = map[string]interface{}{}
+	}
+
+	// 4. 构造系统 prompt 与 messages
+	systemPrompt, promptBD := a.buildSystemPrompt(userID, kv, userInput)
+	messages := buildMessages(systemPrompt, dbMsgs)
+	tools := a.toolExec.ToolDefinitions()
+
+	// 预计算 tools / history / user message 字符数，供后续 usage 日志分析
+	toolsChars := 0
+	if toolsJSON, err := json.Marshal(tools); err == nil {
+		toolsChars = len(toolsJSON)
+	}
+	histChars, userChars := 0, 0
+	for i, m := range messages {
+		if i == 0 {
+			continue // messages[0] 是 system prompt
+		}
+		chars := len(m.Content)
+		for _, tc := range m.ToolCalls {
+			if b, err := json.Marshal(tc); err == nil {
+				chars += len(b)
+			}
+		}
+		if i == len(messages)-1 && m.Role == "user" {
+			userChars = chars
+		} else {
+			histChars += chars
+		}
+	}
+	return &runState{
+		messages:   messages,
+		tools:      tools,
+		promptBD:   promptBD,
+		toolsChars: toolsChars,
+		histChars:  histChars,
+		userChars:  userChars,
+	}, nil
+}
+
+// processToolResult 处理单个工具调用的原始结果：
+// 多模态工具（如 read_image）注入 Parts；图片工具自动推送 WriteImage；
+// 下载文件写入 origin_session_messages 供前端展示。
+// 返回供 in-memory 追加的 toolMsg 及待写入 DB 的 dbContent。
+func (a *Agent) processToolResult(userID, sessionID string, writer StreamWriter, tc llm.ToolCall, result string) (toolMsg llm.ChatMessage, dbContent string) {
+	toolMsg = llm.ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name}
+	dbContent = result
+	if parts, textSummary, webURL, ok := tool.DecodePartsResult(result); ok {
+		// 多模态工具结果（如 read_image）：in-memory 注入 Parts，DB 只存文字摘要
+		toolMsg.Parts = parts
+		toolMsg.Content = textSummary // 文字回退，供不支持多模态 tool result 的 provider
+		dbContent = textSummary
+		if webURL != "" {
+			if imgErr := writer.WriteImage(webURL); imgErr != nil {
+				logger.Warn("agent", userID, sessionID, "WriteImage failed: "+imgErr.Error(), 0)
+			}
+		}
+	} else {
+		// 普通工具结果中若含 webUrl 字段（browser screenshot），自动推送给前端内联展示。
+		// 同时将整个工具结果替换为不含路径信息的纯确认消息，
+		// 防止 LLM 从 path / absolutePath 等字段反推出 URL 再嵌入回复文本。
+		if webURL := extractWebURL(result); webURL != "" {
+			localPath := extractLocalPath(result)
+			dlURL := extractDownloadURL(result)
+			if imgErr := writer.WriteImage(webURL); imgErr != nil {
+				logger.Warn("agent", userID, sessionID, "WriteImage failed: "+imgErr.Error(), 0)
+				result = fmt.Sprintf(`{"status":"error","message":"Image saved but delivery to channel failed: %s. Do NOT embed image markdown in text.","path":%q}`,
+					imgErr.Error(), localPath)
+			} else {
+				go func(url, lpath string) {
+					att := storage.Attachment{
+						Type:     "image",
+						URL:      url,
+						Filename: filepath.Base(url),
+					}
+					if lpath != "" {
+						if info, statErr := os.Stat(lpath); statErr == nil {
+							att.Size = info.Size()
+						}
+					}
+					_ = storage.AddOriginMessage(userID, sessionID, "assistant", "", []storage.Attachment{att})
+				}(webURL, localPath)
+				if dlURL != "" {
+					result = fmt.Sprintf(`{"status":"ok","message":"Image sent to channel automatically. Do NOT embed image markdown in text. If user requests a download link, use the download_url field.","download_url":%q}`, dlURL)
+				} else if localPath != "" {
+					result = fmt.Sprintf(`{"status":"ok","message":"Image sent to channel automatically. Do NOT embed image markdown in text. If user explicitly requests a download link, call output_file(action=download,file_path=<path>).","path":%q}`, localPath)
+				} else {
+					result = `{"status":"ok","message":"Image sent to the user's channel automatically. Do NOT embed any URL or image markdown in your reply."}`
+				}
+			}
+			// dbContent 同步更新：防止原始含路径的结果存入 DB 后在后续轮次中被 LLM 读到
+			dbContent = result
+		} else if dlURL := extractDownloadURL(result); dlURL != "" {
+			// 非图片生成文件（PDF / Excel / zip 等）：只有 download_url，无 webUrl。
+			localPath := extractLocalPath(result)
+			go func(dlurl, lpath string) {
+				att := storage.Attachment{
+					Type:     "file",
+					URL:      dlurl,
+					Filename: filepath.Base(lpath),
+				}
+				if lpath != "" {
+					if info, statErr := os.Stat(lpath); statErr == nil {
+						att.Size = info.Size()
+					}
+				}
+				_ = storage.AddOriginMessage(userID, sessionID, "assistant", "", []storage.Attachment{att})
+			}(dlURL, localPath)
+		}
+		toolMsg.Content = result
+	}
+	return
+}
+
+// persistToolResult 将工具结果写入 DB，记录日志，推送完成/错误进度事件，
+// 并将该 tool call 从 pendingCalls 中移除（防止 defer 重复写 synthetic error）。
+func (a *Agent) persistToolResult(userID, sessionID string, writer StreamWriter, tc llm.ToolCall, dbContent string, toolErr error, toolStart, start time.Time, pendingCalls *[]pendingToolCall) {
+	costMs := time.Since(toolStart).Milliseconds()
+	if toolErr != nil {
+		logger.Error("tool", userID, sessionID,
+			fmt.Sprintf("tool %q failed", tc.Function.Name), toolErr, time.Since(toolStart))
+		_ = writer.WriteProgress("tool_error",
+			fmt.Sprintf("%s • %s • %dms", tc.Function.Name, truncate(toolErr.Error(), config.Cfg.ToolErrorSummaryLen), costMs),
+			time.Since(start).Milliseconds())
+	} else {
+		logger.Debug("tool", userID, sessionID,
+			fmt.Sprintf("tool %q done result_len=%d cost=%dms",
+				tc.Function.Name, len(dbContent), costMs), 0)
+		_ = writer.WriteProgress("tool_done",
+			fmt.Sprintf("%s • %dms", tc.Function.Name, costMs),
+			time.Since(start).Milliseconds())
+	}
+	// 超大工具结果：DB 只存重新获取提示，降低历史消息 token 占用；
+	// in-memory toolMsg.Content 仍保留完整结果，供本轮 LLM 正常使用。
+	if max := config.Cfg.ToolResultMaxDBBytes; max > 0 && len(dbContent) > max {
+		dbContent = buildReFetchHint(tc.Function.Name, tc.Function.Arguments, sessionID, dbContent)
+	}
+	if err := storage.AddMessage(userID, sessionID, "tool", dbContent, tc.ID, tc.Function.Name, ""); err != nil {
+		logger.Error("agent", userID, sessionID, "save tool result failed", err, 0)
+	} else {
+		// tool_result 已写入 DB，从 pending 移除（防止 defer 重复写）
+		for i, pc := range *pendingCalls {
+			if pc.id == tc.ID {
+				*pendingCalls = append((*pendingCalls)[:i], (*pendingCalls)[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 // ----- 内部辅助函数 -----

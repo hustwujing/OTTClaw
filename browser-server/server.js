@@ -887,7 +887,8 @@ app.post('/tab/close', async (req, res) => {
 
 // POST /render  { html, selector?, waitSelector?, timeoutMs? }
 // 一步完成"写临时 HTML → 打开 → 等待渲染 → 截图 → 清理"全流程。
-// 使用共享 browser 开临时 context（4× 高清），渲染完成后立即关闭，不干扰用户的浏览器会话。
+// 策略：SVG 是矢量格式，在更大的 CSS 尺寸下重绘比单纯提高 deviceScaleFactor 更清晰。
+// 渲染后将 SVG 容器撑到 1600px CSS 宽，再用 deviceScaleFactor:2 截图 → 输出约 3200px 宽高清 PNG。
 app.post('/render', async (req, res) => {
   try {
     if (!browser) {
@@ -896,10 +897,10 @@ app.post('/render', async (req, res) => {
     const { html, selector, waitSelector, timeoutMs = 10000 } = req.body;
     if (!html) return res.status(400).json({ error: 'html is required' });
 
-    // 临时 context：4× deviceScaleFactor 确保图表文字清晰锐利
+    // 宽视口 + 2× 物理像素；SVG 扩展到 1600px CSS 后输出约 3200px，比小尺寸 4× 更清晰
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      deviceScaleFactor: 4,
+      viewport: { width: 1920, height: 1080 },
+      deviceScaleFactor: 2,
     });
     const page = await context.newPage();
 
@@ -933,12 +934,40 @@ app.post('/render', async (req, res) => {
       // 额外等待一小段时间确保渲染稳定
       await page.waitForTimeout(500);
 
-      // 截图
+      // 将目标容器及内部 SVG 扩展到至少 1600px CSS 宽。
+      // SVG 是矢量格式，CSS 尺寸越大浏览器以更高精度重绘，文字/线条天然清晰。
+      if (selector) {
+        await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return;
+          const currentWidth = el.getBoundingClientRect().width || 600;
+          if (currentWidth < 1600) {
+            el.style.width = '1600px';
+            el.style.maxWidth = 'none';
+          }
+          const svg = el.querySelector('svg');
+          if (svg) {
+            svg.style.width = '100%';
+            svg.style.maxWidth = 'none';
+            svg.style.height = 'auto';
+          }
+        }, selector);
+        // 等待 SVG 按新尺寸重排
+        await page.waitForTimeout(150);
+      }
+
+      // 截图：page.screenshot({ clip }) 默认 scale:'device'，
+      // 始终输出 CSS尺寸 × deviceScaleFactor 的物理像素，比 locator.screenshot() 更可靠。
       const screenshotName = `screenshot_${Date.now()}.png`;
       const screenshotPath = path.join(dir, screenshotName);
 
       if (selector) {
-        await page.locator(selector).first().screenshot({ path: screenshotPath });
+        const box = await page.locator(selector).first().boundingBox();
+        if (box) {
+          await page.screenshot({ path: screenshotPath, clip: box });
+        } else {
+          await page.screenshot({ path: screenshotPath });
+        }
       } else {
         await page.screenshot({ path: screenshotPath });
       }
