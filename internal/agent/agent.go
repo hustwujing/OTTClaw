@@ -993,6 +993,92 @@ func logUserInput(input string) string {
 	return strings.Join(parts, " ")
 }
 
+// flattenHistoryToolCalls 将历史消息中所有 (assistant+ToolCalls, tool...) 组合
+// 扁平化为纯文本 assistant 消息，消除历史上下文中的 tool_use block。
+//
+// 背景：Anthropic API 要求 tool_use.id 严格匹配 ^[a-zA-Z0-9_-]+$。
+// 若历史消息经过压缩/重建后 ID 出现任何偏差（空串、非法字符），将触发 400 错误。
+// 扁平化后历史上下文只含纯文本，彻底规避此类问题。
+//
+// 处理规则：
+//   - assistant+ToolCalls + 后续 tool 消息 → 合并为单条纯文本 assistant 消息
+//   - 孤立 tool 消息（正常不应出现） → 转为 user 消息，加 "[工具结果]" 前缀
+//   - msgs[0]（system prompt）及其他消息原样保留
+//
+// 注意：此函数仅处理 buildMessages 返回的历史消息，不影响 agent 循环中
+// in-memory 新增的当前轮 tool call 消息（这些仍保留结构化格式供本轮 LLM 调用）。
+func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+	result := make([]llm.ChatMessage, 0, len(msgs))
+	result = append(result, msgs[0]) // system prompt 原样保留
+	i := 1
+	for i < len(msgs) {
+		m := msgs[i]
+		switch {
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			// 收集紧随其后的所有 tool 消息，按 ToolCallID 建立映射
+			toolContents := make(map[string]string, len(m.ToolCalls))
+			j := i + 1
+			for j < len(msgs) && msgs[j].Role == "tool" {
+				toolContents[msgs[j].ToolCallID] = msgs[j].Content
+				j++
+			}
+			// 合并为纯文本：原始文本 + 每个工具调用结果摘要
+			var sb strings.Builder
+			if m.Content != "" {
+				sb.WriteString(m.Content)
+				sb.WriteString("\n")
+			}
+			for _, tc := range m.ToolCalls {
+				sb.WriteString("[调用 ")
+				sb.WriteString(tc.Function.Name)
+				sb.WriteString("] → ")
+				if content, ok := toolContents[tc.ID]; ok {
+					sb.WriteString(truncateToolResultForHistory(content))
+				} else {
+					sb.WriteString("(无结果)")
+				}
+				sb.WriteString("\n")
+			}
+			result = append(result, llm.ChatMessage{
+				Role:    "assistant",
+				Content: strings.TrimSpace(sb.String()),
+			})
+			i = j // 跳过已消费的 tool 消息
+
+		case m.Role == "tool":
+			// 孤立 tool 消息（防御性处理，正常流程不应出现）
+			// 转为 user 消息，避免向 Anthropic 发送没有前驱 tool_use 的 tool_result
+			result = append(result, llm.ChatMessage{
+				Role:    "user",
+				Content: "[工具结果] " + m.Content,
+			})
+			i++
+
+		default:
+			result = append(result, m)
+			i++
+		}
+	}
+	return result
+}
+
+// truncateToolResultForHistory 将工具结果内容截断到适合历史上下文展示的长度。
+// 历史中的 tool result 已经过 maxHistoryToolResult（8000 字符）或 refetch hint 处理，
+// 此处进一步截断为 500 字符摘要，减少扁平化后的 token 占用。
+// refetch hint 本身通常不超过 100 字符，不会被截断，LLM 仍能读到完整的重获取指引。
+const flattenToolResultMaxRunes = 500
+
+func truncateToolResultForHistory(content string) string {
+	runes := []rune(content)
+	if len(runes) <= flattenToolResultMaxRunes {
+		return content
+	}
+	return string(runes[:flattenToolResultMaxRunes]) + "…[如需完整内容请重新调用工具]"
+}
+
 // buildReFetchHint 根据工具名称和参数生成具体的重新获取提示，
 // 存入 DB 代替超大工具结果，引导 LLM 在需要时主动调用对应工具。
 func buildReFetchHint(toolName, argsJSON string) string {
@@ -1229,5 +1315,10 @@ func buildMessages(systemPrompt string, dbMsgs []storage.SessionMessage) []llm.C
 		}
 		msgs = append(msgs, cm)
 	}
+
+	// 将历史 tool call 结构（assistant+ToolCalls + tool...）扁平化为纯文本 assistant 消息。
+	// 彻底消除历史上下文中的 tool_use block，规避 Anthropic 对 tool_use.id 的格式校验失败。
+	// 当前轮在 agent 循环中 in-memory 新增的 tool call 消息不经过此函数，仍保留结构化格式。
+	msgs = flattenHistoryToolCalls(msgs)
 	return msgs
 }
