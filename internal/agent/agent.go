@@ -1285,7 +1285,7 @@ func (a *Agent) compressHistory(ctx context.Context, userID, sessionID string, m
 	summaryReq := make([]llm.ChatMessage, 0, len(oldPart)+1)
 	summaryReq = append(summaryReq, llm.ChatMessage{
 		Role:    "system",
-		Content: "请用简洁的中文对以下对话历史进行摘要，保留关键信息、决策和结论，忽略工具调用细节。",
+		Content: "请用简洁的中文对以下对话历史进行摘要，保留关键信息、决策和结论，忽略工具调用细节。\n必须在摘要中原样保留以下信息（如有出现）：\n- 用户（user）的每一条指令和要求，尽量保留原文\n- KV key（格式如 _tool_result_xxx）\n- exec 后台进程的 session_id（格式如 es_xxx）\n- 正在操作的文件路径",
 	})
 	summaryReq = append(summaryReq, sanitizeForSummary(oldPart)...)
 
