@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
@@ -173,8 +175,31 @@ func main() {
 
 	addr := ":" + config.Cfg.ServerPort
 	logger.Info("main", "", "", "server starting on "+addr, 0)
-	if err := r.Run(addr); err != nil {
+
+	// 自定义 Listener：对每个 TCP 连接设置 TCP_NODELAY，禁用 Nagle 算法，
+	// 确保 SSE 事件 Flush 后立即发送而不被合并到下一个 TCP 段。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: r}
+	ln = tcpNoDelayListener{ln}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// tcpNoDelayListener 包装 net.Listener，对每个 Accept 的 TCP 连接设置 NoDelay。
+type tcpNoDelayListener struct{ net.Listener }
+
+func (l tcpNoDelayListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return conn, err
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+	return conn, nil
 }
 

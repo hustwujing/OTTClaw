@@ -214,7 +214,7 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 		return nil, fmt.Errorf("llm api error %d: %s", resp.StatusCode, string(b))
 	}
 
-	events := make(chan StreamEvent, 64)
+	events := make(chan StreamEvent, 1)
 	go func() {
 		defer resp.Body.Close()
 		defer close(events)
