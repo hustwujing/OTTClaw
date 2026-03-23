@@ -125,11 +125,14 @@ type openAIClient struct {
 
 func newOpenAIClientFromEndpoint(ep config.LLMEndpointConfig) *openAIClient {
 	return &openAIClient{
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		baseURL:    ep.BaseURL,
-		apiKey:     ep.APIKey,
-		model:      ep.Model,
-		maxTokens:  ep.MaxTokens,
+		httpClient: &http.Client{
+			Timeout:   120 * time.Second,
+			Transport: streamTransport(),
+		},
+		baseURL:   ep.BaseURL,
+		apiKey:    ep.APIKey,
+		model:     ep.Model,
+		maxTokens: ep.MaxTokens,
 	}
 }
 
@@ -202,6 +205,7 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 		return nil, fmt.Errorf("build http request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(httpReq)

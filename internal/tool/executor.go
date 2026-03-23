@@ -1253,6 +1253,11 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 		return "", fmt.Errorf("skill_id escapes skills base directory")
 	}
 
+	// sub_path 为 "SKILL.md" 时自动纠正为空（LLM 常见误用）
+	if args.SubPath == "SKILL.md" || strings.EqualFold(args.SubPath, "skill.md") {
+		args.SubPath = ""
+	}
+
 	// 无 sub_path → 写 SKILL.md（原有逻辑）
 	if args.SubPath == "" {
 		parsed, err := skill.ParseContent(args.Content)

@@ -267,28 +267,32 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 
 	// LLM 循环：最多执行 N 轮，防止无限循环（AGENT_MAX_ITERATIONS，默认 20）
 	maxIterations := config.Cfg.AgentMaxIterations
+	hasCompressed := false // 每次 Run() 只允许压缩一次，防止「压缩 → 工具执行 → 再次超限 → 再压缩」循环
 	for iter := 0; iter < maxIterations; iter++ {
-		// 检查是否触发上下文压缩
-		if estToks := estimateTokens(messages); estToks > config.Cfg.MaxContextTokens {
-			logger.Info("agent", userID, sessionID,
-				fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d",
-					estToks, config.Cfg.MaxContextTokens), 0)
-			// 预检：历史消息 > keepRecent 才会真正压缩，才值得推送 compress_start。
-			// 避免新会话中大文件读取导致阈值超限但实际无历史可压的"假压缩"事件。
-			if len(messages)-1 > config.Cfg.CompressKeepRecent {
-				_ = writer.WriteProgress("compress_start", "聊太多了，有点儿乱，让我先理一下…", time.Since(start).Milliseconds())
-			}
-			compressed, didCompress, compressErr := a.compressHistory(ctx, userID, sessionID, messages)
-			if compressErr != nil {
-				logger.Error("agent", userID, sessionID, "compress history failed", compressErr, 0)
-				_ = writer.WriteProgress("compress_error", "没理清楚，咱们先继续", time.Since(start).Milliseconds())
-			} else if didCompress {
-				messages = compressed
+		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
+		if !hasCompressed {
+			if estToks := estimateTokens(messages); estToks > config.Cfg.MaxContextTokens {
 				logger.Info("agent", userID, sessionID,
-					fmt.Sprintf("context compressed new_tokens=%d", estimateTokens(messages)), 0)
-				_ = writer.WriteProgress("compress_done", "理清楚了，咱们继续…", time.Since(start).Milliseconds())
+					fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d",
+						estToks, config.Cfg.MaxContextTokens), 0)
+				// 预检：历史消息 > keepRecent 才会真正压缩，才值得推送 compress_start。
+				// 避免新会话中大文件读取导致阈值超限但实际无历史可压的"假压缩"事件。
+				if len(messages)-1 > config.Cfg.CompressKeepRecent {
+					_ = writer.WriteProgress("compress_start", "聊太多了，有点儿乱，让我先理一下…", time.Since(start).Milliseconds())
+				}
+				compressed, didCompress, compressErr := a.compressHistory(ctx, userID, sessionID, messages)
+				if compressErr != nil {
+					logger.Error("agent", userID, sessionID, "compress history failed", compressErr, 0)
+					_ = writer.WriteProgress("compress_error", "没理清楚，咱们先继续", time.Since(start).Milliseconds())
+				} else if didCompress {
+					messages = compressed
+					hasCompressed = true
+					logger.Info("agent", userID, sessionID,
+						fmt.Sprintf("context compressed new_tokens=%d", estimateTokens(messages)), 0)
+					_ = writer.WriteProgress("compress_done", "理清楚了，咱们继续…", time.Since(start).Milliseconds())
+				}
+				// didCompress=false：历史消息不足 keepRecent 或找不到安全切割点，静默跳过
 			}
-			// didCompress=false：历史消息不足 keepRecent 或找不到安全切割点，静默跳过
 		}
 
 		iterStart := time.Now()
@@ -309,9 +313,21 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				fmt.Sprintf("llm input iter=%d", iter), data, 0)
 		}
 
-		// 调用 LLM 流式接口
-		eventCh, err := a.llmClient.ChatStream(ctx, messages, tools)
-		if err != nil {
+		// 调用 LLM 流式接口（含重试：EOF 等瞬时网络错误最多重试 1 次）
+		const llmMaxRetries = 1
+		var eventCh <-chan llm.StreamEvent
+		for attempt := 0; ; attempt++ {
+			var err error
+			eventCh, err = a.llmClient.ChatStream(ctx, messages, tools)
+			if err == nil {
+				break
+			}
+			if attempt < llmMaxRetries && isTransientErr(err) {
+				logger.Warn("llm", userID, sessionID,
+					fmt.Sprintf("llm call transient error (attempt %d), retrying: %v", attempt+1, err), 0)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
 			logger.Error("llm", userID, sessionID, "llm stream error", err, time.Since(iterStart))
 			_ = writer.WriteError("LLM 调用失败: " + err.Error())
 			return err
@@ -342,6 +358,15 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			if len(ev.ToolCalls) > 0 {
 				toolCalls = ev.ToolCalls
 			}
+		}
+
+		// 流读取阶段的瞬时错误：若尚未产生任何输出，可重试本轮
+		if streamErr != nil && textBuf.Len() == 0 && len(toolCalls) == 0 && isTransientErr(streamErr) {
+			logger.Warn("llm", userID, sessionID,
+				fmt.Sprintf("llm stream transient error with no output, retrying iter: %v", streamErr), 0)
+			time.Sleep(500 * time.Millisecond)
+			iter-- // 重试本轮（不消耗迭代次数）
+			continue
 		}
 
 		// 记录 token 消耗到日志和数据库
@@ -395,6 +420,16 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			if assistantText == "" {
 				assistantText = "（我已完成处理，但没有返回说明。如果结果不符合预期，请重新描述你的需求。）"
 				_ = writer.WriteText(assistantText)
+			}
+			// LLM 输出了无意义占位符（"..."、"[ok]"等）而非真正内容，
+			// 这通常是历史消息中占位符被模仿的结果，不应当作正常回答结束循环。
+			// 将其追加到 messages 中让 LLM 在下一轮继续工作。
+			if isMimickedPlaceholder(assistantText) && iter < maxIterations-1 {
+				logger.Warn("agent", userID, sessionID,
+					fmt.Sprintf("LLM output mimicked placeholder %q at iter=%d, retrying", assistantText, iter), 0)
+				messages = append(messages, llm.ChatMessage{Role: "assistant", Content: assistantText})
+				messages = append(messages, llm.ChatMessage{Role: "user", Content: "请继续完成任务，不要只回复占位符。"})
+				continue
 			}
 			if err := storage.AddMessage(userID, sessionID, "assistant", assistantText, "", "", ""); err != nil {
 				logger.Error("agent", userID, sessionID, "save assistant message failed", err, 0)
@@ -568,7 +603,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			// in-memory toolMsg.Content 仍保留完整结果，供本轮 LLM 正常使用。
 			if max := config.Cfg.ToolResultMaxDBBytes; max > 0 {
 				if len(dbContent) > max {
-					dbContent = buildReFetchHint(tc.Function.Name, tc.Function.Arguments)
+					dbContent = buildReFetchHint(tc.Function.Name, tc.Function.Arguments, sessionID, dbContent)
 				}
 			}
 			if err := storage.AddMessage(userID, sessionID, "tool", dbContent, tc.ID, tc.Function.Name, ""); err != nil {
@@ -848,11 +883,47 @@ func isUIOnlyTool(tc llm.ToolCall) bool {
 	return tc.Function.Name == "notify" && notifyAction(tc.Function.Arguments) == "progress"
 }
 
+// isMimickedPlaceholder 判断 LLM 输出是否为从历史消息中学到的占位符模仿。
+// 这类输出不是真正的回答，不应结束 agent loop。
+func isMimickedPlaceholder(text string) bool {
+	t := strings.TrimSpace(text)
+	switch t {
+	case "...", "[ok]", "…", "(continued)", "OK", "ok":
+		return true
+	}
+	// 纯标点/省略号组合
+	if len(t) <= 6 && strings.Trim(t, ".…。·") == "" {
+		return true
+	}
+	return false
+}
+
+// isTransientErr 判断是否为可重试的瞬时网络错误（EOF、connection reset 等）。
+func isTransientErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "EOF") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "TLS handshake timeout")
+}
+
 // hasInteractiveTool 判断本轮 tool_calls 中是否包含需要等待用户交互的工具。
 // 包含则 Agent 循环应立即终止，等待用户在下一轮对话中回复。
+//
+// 交互工具包括：
+//   - notify(action=options/confirm)：显式弹出选择/确认框
+//   - exec：命令审批确认框（exec 返回 pending_approval，等待用户点击确认后调 exec_run）
 func hasInteractiveTool(calls []llm.ToolCall) bool {
 	for _, tc := range calls {
-		if tc.Function.Name == "notify" {
+		switch tc.Function.Name {
+		case "exec":
+			// exec 工具总是推送确认框并返回 pending_approval，属于交互工具
+			return true
+		case "notify":
 			switch notifyAction(tc.Function.Arguments) {
 			case "options", "confirm":
 				return true
@@ -1016,7 +1087,7 @@ func logUserInput(input string) string {
 //     在后续响应中直接输出 "[调用 X] → result" 文本，而不再真正调用工具。
 //
 // 处理规则：
-//   - assistant+ToolCalls → 纯文本 assistant 消息（仅保留原始文本；若为空则用 "..." 占位）
+//   - assistant+ToolCalls → 纯文本 assistant 消息（仅保留原始文本；若为空则用 "[ok]" 占位）
 //   - 对应的 tool 消息 → 独立的 user 消息（"[工具 name 结果]: content"）
 //   - 相邻 user 消息合并（满足 LLM 角色交替要求）
 //   - 孤立 tool 消息（正常不应出现） → 转为 user 消息，加 "[工具结果]" 前缀
@@ -1045,10 +1116,11 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 			// assistant 消息：仅保留原始文本，不附加任何工具名称标注。
 			// 若附加"[调用工具: xxx]"，LLM 会学习并在后续回复中模仿输出该文本，
 			// 导致真正的工具调用被文字替代（与工具名无关，只要看起来像"我要调用工具"就会被模仿）。
-			// 若原文为空（纯工具调用轮），用最短的占位符"..."维持角色交替，避免 user-user 相邻。
+			// 若原文为空（纯工具调用轮），用 "[ok]" 占位维持角色交替。
+			// 不可用 "..."——LLM 会从历史中学习并在后续轮直接输出 "..." 作为完整回答导致异常结束。
 			assistantContent := strings.TrimSpace(m.Content)
 			if assistantContent == "" {
-				assistantContent = "..."
+				assistantContent = "[ok]"
 			}
 			raw = append(raw, llm.ChatMessage{
 				Role:    "assistant",
@@ -1063,7 +1135,7 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 			for _, tc := range m.ToolCalls {
 				content := "(无结果)"
 				if c, ok := toolContents[tc.ID]; ok {
-					content = truncateToolResultForHistory(c)
+					content = c
 				}
 				raw = append(raw, llm.ChatMessage{
 					Role:    "user",
@@ -1098,23 +1170,9 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 	return result
 }
 
-// truncateToolResultForHistory 将工具结果内容截断到适合历史上下文展示的长度。
-// 历史中的 tool result 已经过 maxHistoryToolResult（8000 字符）或 refetch hint 处理，
-// 此处进一步截断为 500 字符摘要，减少扁平化后的 token 占用。
-// refetch hint 本身通常不超过 100 字符，不会被截断，LLM 仍能读到完整的重获取指引。
-const flattenToolResultMaxRunes = 500
-
-func truncateToolResultForHistory(content string) string {
-	runes := []rune(content)
-	if len(runes) <= flattenToolResultMaxRunes {
-		return content
-	}
-	return string(runes[:flattenToolResultMaxRunes]) + "…[如需完整内容请重新调用工具]"
-}
-
 // buildReFetchHint 根据工具名称和参数生成具体的重新获取提示，
 // 存入 DB 代替超大工具结果，引导 LLM 在需要时主动调用对应工具。
-func buildReFetchHint(toolName, argsJSON string) string {
+func buildReFetchHint(toolName, argsJSON, sessionID, fullContent string) string {
 	var args struct {
 		Action string `json:"action"`
 		Path   string `json:"path"`
@@ -1122,6 +1180,7 @@ func buildReFetchHint(toolName, argsJSON string) string {
 	_ = json.Unmarshal([]byte(argsJSON), &args)
 	path := args.Path
 
+	// 可重新读取的文件类工具：引导 LLM 直接重新调用
 	switch toolName {
 	case "fs":
 		if args.Action == "read" && path != "" {
@@ -1146,7 +1205,29 @@ func buildReFetchHint(toolName, argsJSON string) string {
 			return fmt.Sprintf("[内容过大已省略] 重新获取 PDF 内容请调用 read_pdf(path=%q)", path)
 		}
 	}
+
+	// 其他工具（process / exec_run / web_fetch / skill 等）：结果不可重新获取，
+	// 存入会话 KV，引导 LLM 通过 kv(action=get) 读取完整内容。
+	if sessionID != "" && fullContent != "" {
+		kvKey := fmt.Sprintf("_tool_result_%s_%d", toolName, time.Now().UnixMilli())
+		if saved := saveToolResultToKV(sessionID, kvKey, fullContent); saved {
+			return fmt.Sprintf("[内容过大已省略，已存入 KV] 获取完整内容请调用 kv(action=get, key=%q)", kvKey)
+		}
+	}
 	return fmt.Sprintf("[内容过大已省略] 如需重新获取，请再次调用 %s", toolName)
+}
+
+// saveToolResultToKV 将超大工具结果存入会话 KV，供后续轮次通过 kv(action=get) 读取。
+func saveToolResultToKV(sessionID, key, content string) bool {
+	kv, err := storage.GetSessionKV(sessionID)
+	if err != nil {
+		return false
+	}
+	kv[key] = content
+	if err := storage.UpdateSessionKV(sessionID, kv); err != nil {
+		return false
+	}
+	return true
 }
 
 // estimateTokens 粗略估算 messages 的 token 数（bytes/3，适用于中英文混合场景）
@@ -1322,10 +1403,6 @@ func buildMessages(systemPrompt string, dbMsgs []storage.SessionMessage) []llm.C
 		Content: systemPrompt,
 	})
 
-	// 历史 tool 结果截断阈值：防止 fs_read/browser(snapshot)/read_file 等大结果反复注入上下文
-	// 当次执行时 tool 结果以全量写入 in-memory messages，只有从 DB 加载的历史才截断。
-	const maxHistoryToolResult = 8000 // ~2667 tokens
-
 	// 历史对话
 	for _, m := range dbMsgs {
 		cm := llm.ChatMessage{
@@ -1333,11 +1410,6 @@ func buildMessages(systemPrompt string, dbMsgs []storage.SessionMessage) []llm.C
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
-		}
-		// 大型 tool 结果在历史中截断，避免 token 累积触发不必要的压缩
-		if m.Role == "tool" && len(cm.Content) > maxHistoryToolResult {
-			cm.Content = cm.Content[:maxHistoryToolResult] +
-				fmt.Sprintf("\n…[历史截断：原始结果 %d 字符，如需完整内容请重新调用工具]", len(m.Content))
 		}
 		// 重建 ToolCalls
 		if m.ToolCallsJSON != "" {

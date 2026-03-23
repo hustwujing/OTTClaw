@@ -12,6 +12,7 @@ package llm
 
 import (
 	"context"
+	"net/http"
 
 	"OTTClaw/config"
 )
@@ -121,4 +122,14 @@ func NewClient() Client {
 		clients = append(clients, newClientFromEndpoint(ep))
 	}
 	return &poolClient{clients: clients}
+}
+
+// streamTransport 返回一个基于 DefaultTransport 克隆的 Transport，
+// 仅关闭自动 gzip 压缩。保留连接池、Keep-Alive、TLS 握手超时等默认配置。
+// 禁用 gzip 是因为：若 LLM 代理返回 gzip 压缩的 SSE 流，Go 的 gzipReader
+// 需要累积一个完整 deflate block 才能解压，导致流式 token 被缓冲。
+func streamTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DisableCompression = true
+	return t
 }

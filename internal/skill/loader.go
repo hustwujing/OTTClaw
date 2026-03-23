@@ -27,12 +27,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
 
-// Separator 技能文件中 HEAD 与 CONTENT 的分割线
+// Separator 技能文件中 HEAD 与 CONTENT 的标准分割线（30 个 '='）。
+// 写入时使用此标准格式；解析时放宽为 10 个以上连续 '=' 即可匹配。
 const Separator = "=============================="
+
+// separatorRe 匹配行首 10 个以上连续 '='（容忍 LLM 输出数量不精确）
+var separatorRe = regexp.MustCompile(`(?m)^={10,}\s*$`)
 
 // Head 技能头部信息（仅元数据，不含完整内容）
 type Head struct {
@@ -284,18 +289,13 @@ func (s *store) GetSkillDir(userID, skillID string) (string, bool) {
 //   - HEAD 中 skill_id 和 name 字段非空
 //   - CONTENT 区（第二分隔符之后）非空
 func ParseContent(content string) (*Skill, error) {
-	first := strings.Index(content, Separator)
-	if first == -1 {
-		return nil, fmt.Errorf("缺少第一个分隔符（需要恰好 30 个 '='）")
-	}
-	rest := content[first+len(Separator):]
-	second := strings.Index(rest, Separator)
-	if second == -1 {
-		return nil, fmt.Errorf("缺少第二个分隔符（HEAD 与 CONTENT 之间需要 30 个 '='）")
+	locs := separatorRe.FindAllStringIndex(content, 3)
+	if len(locs) < 2 {
+		return nil, fmt.Errorf("缺少分隔符（需要至少两行连续 10 个以上 '='）")
 	}
 
-	headSection := strings.TrimSpace(rest[:second])
-	bodySection := strings.TrimSpace(rest[second+len(Separator):])
+	headSection := strings.TrimSpace(content[locs[0][1]:locs[1][0]])
+	bodySection := strings.TrimSpace(content[locs[1][1]:])
 
 	sk := &Skill{Content: bodySection}
 	sk.SkillID, sk.Name, sk.DisplayName, sk.Description, sk.Trigger, sk.Enable = parseHead(headSection)

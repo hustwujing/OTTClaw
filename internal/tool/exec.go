@@ -264,6 +264,7 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 	return execMarshal(map[string]any{
 		"status":     "pending_approval",
 		"pending_id": pending.id,
+		"command":    args.Command,
 		"hint":       "Command is awaiting user approval. Stop and wait. After user confirms, call exec_run(pending_id) to execute. If user cancels, do not call exec_run.",
 	}), nil
 }

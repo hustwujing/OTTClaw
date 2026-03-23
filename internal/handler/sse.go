@@ -58,6 +58,11 @@ func SSE(c *gin.Context) {
 		return
 	}
 
+	// 立即发送 header 并 Flush，让浏览器知道 SSE 连接已建立。
+	// Go net/http 在首次 Write 前不会发送 header，这会导致前几个事件延迟。
+	c.Writer.WriteHeaderNow()
+	flusher.Flush()
+
 	writer := &sseWriter{
 		w:       c.Writer,
 		flusher: flusher,

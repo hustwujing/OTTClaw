@@ -82,11 +82,14 @@ func newAnthropicClientFromEndpoint(ep config.LLMEndpointConfig) *anthropicClien
 		maxTokens = 8096
 	}
 	return &anthropicClient{
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		apiKey:     ep.APIKey,
-		model:      ep.Model,
-		maxTokens:  maxTokens,
-		baseURL:    baseURL,
+		httpClient: &http.Client{
+			Timeout:   120 * time.Second,
+			Transport: streamTransport(),
+		},
+		apiKey:    ep.APIKey,
+		model:     ep.Model,
+		maxTokens: maxTokens,
+		baseURL:   baseURL,
 	}
 }
 
@@ -142,6 +145,7 @@ func (c *anthropicClient) ChatStream(ctx context.Context, messages []ChatMessage
 		return nil, fmt.Errorf("build http request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
