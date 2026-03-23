@@ -185,6 +185,9 @@ function parseSnapshot(raw) {
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+// 静态服务 vendor 目录（本地缓存的 mermaid.js 等前端库）
+app.use('/vendor', express.static(path.join(__dirname, 'vendor')));
+
 // Middleware: extract x-user-id
 app.use((req, res, next) => {
   req.userId = req.headers['x-user-id'] || 'default';
@@ -901,16 +904,27 @@ app.post('/render', async (req, res) => {
     const page = await context.newPage();
 
     try {
+      // 将 CDN mermaid.js 替换为本地静态服务，彻底消除外网依赖
+      const localMermaidPath = path.join(__dirname, 'vendor', 'mermaid.min.js');
+      let finalHtml = html;
+      if (fs.existsSync(localMermaidPath)) {
+        finalHtml = finalHtml.replace(
+          /https?:\/\/(?:cdn\.jsdelivr\.net|unpkg\.com)\/npm\/mermaid[@/][^"']*mermaid[^"']*/g,
+          `http://127.0.0.1:${PORT}/vendor/mermaid.min.js`
+        );
+      }
+
       // 写临时 HTML 文件到 output 目录
       const bucket = req.userId.slice(-1) || '0';
       const dir = path.join(OUTPUT_DIR, bucket);
       fs.mkdirSync(dir, { recursive: true });
       const tmpName = `render_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.html`;
       const tmpPath = path.join(dir, tmpName);
-      fs.writeFileSync(tmpPath, html);
+      fs.writeFileSync(tmpPath, finalHtml);
 
-      // 用 file:// 协议打开临时 HTML
-      await page.goto('file://' + path.resolve(tmpPath), { timeout: timeoutMs, waitUntil: 'domcontentloaded' });
+      // 用 file:// 协议打开临时 HTML；waitUntil: 'commit' 不阻塞等待外部脚本，
+      // 实际渲染完成由后续 waitForSelector 保证。
+      await page.goto('file://' + path.resolve(tmpPath), { timeout: timeoutMs, waitUntil: 'commit' });
 
       // 等待渲染完成
       const effectiveWaitSelector = waitSelector || (selector ? selector + ' svg' : 'body');
