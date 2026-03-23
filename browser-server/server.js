@@ -777,42 +777,15 @@ app.post('/screenshot', async (req, res) => {
 
     const selector = req.body.selector;
 
-    // 如果指定了 selector，先尝试提取 SVG（如 Mermaid 图表）。
-    // SVG 是矢量格式，无像素分辨率损失；提取失败时降级为 PNG 截图。
+    // 如果指定了 selector，等待元素渲染完成后直接 PNG 截图。
+    // PNG 截图能完整捕获页面渲染效果（含 CSS、字体、foreignObject 等），
+    // 比提取 SVG outerHTML 更可靠——后者在 <img> 标签中常因丢失上下文而无法正常显示。
     if (selector) {
-      // 等待 SVG 子元素出现（Mermaid 等异步渲染库在 JS 执行后才生成 <svg>）
-      // 超时则静默继续，下方 evaluate 若仍拿不到会降级到 PNG
-      await page.waitForSelector(selector + ' svg', { timeout: 8000 }).catch(() => {});
+      // 等待目标元素出现（Mermaid 等异步渲染库在 JS 执行后才生成内容）
+      await page.waitForSelector(selector, { timeout: 8000 }).catch(() => {});
+      // 若目标内有 SVG 子元素（如 Mermaid 图表），额外等一下确保渲染完毕
+      await page.waitForSelector(selector + ' svg', { timeout: 5000 }).catch(() => {});
 
-      const svgHTML = await page.evaluate((sel) => {
-        const el = document.querySelector(sel);
-        if (!el) return null;
-        const svg = el.tagName.toLowerCase() === 'svg' ? el : el.querySelector('svg');
-        if (!svg) return null;
-        // 将相对尺寸固化为实际像素，避免 <img> 内嵌时尺寸不确定
-        const box = svg.getBoundingClientRect();
-        if (box.width > 0) {
-          svg.setAttribute('width', String(Math.round(box.width)));
-          svg.setAttribute('height', String(Math.round(box.height)));
-        }
-        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        return svg.outerHTML;
-      }, selector).catch(() => null);
-
-      if (svgHTML) {
-        const svgFilename = `screenshot_${Date.now()}.svg`;
-        const svgFilePath = path.join(dir, svgFilename);
-        fs.writeFileSync(svgFilePath, svgHTML, 'utf-8');
-        const relativePath = path.join(bucket, svgFilename).replace(/\\/g, '/');
-        return res.json({
-          status: 'ok',
-          path: relativePath,
-          absolutePath: svgFilePath,
-          webUrl: '/output/' + relativePath,
-        });
-      }
-
-      // 降级：元素无 SVG，正常 PNG 截图
       const filename = `screenshot_${Date.now()}.png`;
       const filePath = path.join(dir, filename);
       await page.locator(selector).first().screenshot({ path: filePath });
@@ -904,6 +877,71 @@ app.post('/tab/close', async (req, res) => {
     u.refs = new Map();
 
     res.json({ status: 'ok', pageCount: u.pages.length, activePageIdx: u.activePageIdx });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /render  { html, selector?, waitSelector?, timeoutMs? }
+// 一步完成"写临时 HTML → 打开 → 等待渲染 → 截图 → 清理"全流程。
+// 使用共享 browser 开临时 context（4× 高清），渲染完成后立即关闭，不干扰用户的浏览器会话。
+app.post('/render', async (req, res) => {
+  try {
+    if (!browser) {
+      return res.status(503).json({ error: 'Browser not started' });
+    }
+    const { html, selector, waitSelector, timeoutMs = 10000 } = req.body;
+    if (!html) return res.status(400).json({ error: 'html is required' });
+
+    // 临时 context：4× deviceScaleFactor 确保图表文字清晰锐利
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      deviceScaleFactor: 4,
+    });
+    const page = await context.newPage();
+
+    try {
+      // 写临时 HTML 文件到 output 目录
+      const bucket = req.userId.slice(-1) || '0';
+      const dir = path.join(OUTPUT_DIR, bucket);
+      fs.mkdirSync(dir, { recursive: true });
+      const tmpName = `render_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.html`;
+      const tmpPath = path.join(dir, tmpName);
+      fs.writeFileSync(tmpPath, html);
+
+      // 用 file:// 协议打开临时 HTML
+      await page.goto('file://' + path.resolve(tmpPath), { timeout: timeoutMs, waitUntil: 'domcontentloaded' });
+
+      // 等待渲染完成
+      const effectiveWaitSelector = waitSelector || (selector ? selector + ' svg' : 'body');
+      await page.waitForSelector(effectiveWaitSelector, { timeout: timeoutMs }).catch(() => {});
+
+      // 额外等待一小段时间确保渲染稳定
+      await page.waitForTimeout(500);
+
+      // 截图
+      const screenshotName = `screenshot_${Date.now()}.png`;
+      const screenshotPath = path.join(dir, screenshotName);
+
+      if (selector) {
+        await page.locator(selector).first().screenshot({ path: screenshotPath });
+      } else {
+        await page.screenshot({ path: screenshotPath });
+      }
+
+      // 清理临时 HTML 文件
+      try { fs.unlinkSync(tmpPath); } catch (_) {}
+
+      const relativePath = path.join(bucket, screenshotName).replace(/\\/g, '/');
+      res.json({
+        status: 'ok',
+        path: relativePath,
+        absolutePath: screenshotPath,
+        webUrl: '/output/' + relativePath,
+      });
+    } finally {
+      await context.close();
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

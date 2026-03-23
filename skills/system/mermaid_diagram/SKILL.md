@@ -130,14 +130,9 @@ Then write HTML and screenshot — see Step A2.
 
 ### Step A2: Export Mermaid as Image
 
-1. Use `output_file(action=write)` to write the HTML file.
-2. Use the `browser` tool:
-   - `launch` (if not already running)
-   - `navigate` to `{service address}/{rel_path}`
-   - `wait` 3 seconds
-   - `screenshot` with `selector: ".mermaid"` — do NOT use `fullPage: true`
-3. System auto-delivers the screenshot.
-4. **IMPORTANT: Do NOT embed the screenshot URL or `![...]()` in your reply** — already sent.
+1. Use `browser(action=render, html="<full HTML string>", selector=".mermaid")` — one step: auto-launches browser if needed, renders HTML, waits for SVG, takes screenshot, cleans up temp file.
+2. System auto-delivers the screenshot.
+3. **IMPORTANT: Do NOT embed the screenshot URL or `![...]()` in your reply** — already sent.
 
 ---
 

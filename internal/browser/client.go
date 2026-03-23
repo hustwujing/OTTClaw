@@ -244,3 +244,17 @@ func (c *Client) TabOpen(url string) (*TabInfo, error) {
 func (c *Client) TabClose(index int) error {
 	return c.post("/tab/close", map[string]any{"index": index}, nil)
 }
+
+// RenderRequest 一步渲染 HTML 并截图的请求参数
+type RenderRequest struct {
+	HTML         string `json:"html"`
+	Selector     string `json:"selector,omitempty"`
+	WaitSelector string `json:"waitSelector,omitempty"`
+	TimeoutMs    int    `json:"timeoutMs,omitempty"`
+}
+
+// Render 将 HTML 内容渲染为截图，一步完成"写临时文件 → 打开 → 等待 → 截图 → 清理"
+func (c *Client) Render(req RenderRequest) (*ScreenshotResult, error) {
+	var out ScreenshotResult
+	return &out, c.post("/render", req, &out)
+}

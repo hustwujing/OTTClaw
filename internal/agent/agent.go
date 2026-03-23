@@ -823,6 +823,7 @@ func formatToolCall(name, argsJSON string) string {
 // 并将整个工具结果替换为不含路径信息的纯确认消息，
 // 防止 LLM 将 URL 嵌入回复文本（在飞书/企微等渠道会显示为无效 markdown）。
 // 解析失败或字段不存在时返回 ""。
+// 注意：仅当 URL 指向图片文件时才返回非空值，非图片文件（如 .html）不推送。
 func extractWebURL(resultJSON string) string {
 	if len(resultJSON) < 2 || resultJSON[0] != '{' {
 		return ""
@@ -833,7 +834,26 @@ func extractWebURL(resultJSON string) string {
 	if err := json.Unmarshal([]byte(resultJSON), &obj); err != nil {
 		return ""
 	}
+	// 非图片文件的 webUrl 不推送，避免 HTML 等文件被当作 <img> 渲染
+	if obj.WebURL != "" && !looksLikeImageURL(obj.WebURL) {
+		return ""
+	}
 	return obj.WebURL
+}
+
+// looksLikeImageURL 按 URL 路径的扩展名判断是否为图片文件。
+func looksLikeImageURL(u string) bool {
+	// 去掉查询参数和锚点
+	clean := u
+	if idx := strings.IndexAny(clean, "?#"); idx >= 0 {
+		clean = clean[:idx]
+	}
+	ext := strings.ToLower(filepath.Ext(clean))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif":
+		return true
+	}
+	return false
 }
 
 // extractDownloadURL 从工具结果 JSON 中提取 download_url 字段。

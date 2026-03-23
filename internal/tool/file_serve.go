@@ -33,7 +33,7 @@ func SetServerBaseURL(base string) { serverBaseURL.Store(base) }
 // isImagePath 判断路径是否为图片文件（按扩展名）
 func isImagePath(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif":
 		return true
 	}
 	return false

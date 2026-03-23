@@ -56,6 +56,7 @@ type browserArgs struct {
 	Values         []string `json:"values,omitempty"`
 	Selector       string   `json:"selector,omitempty"`
 	Script         string   `json:"script,omitempty"`
+	HTML           string   `json:"html,omitempty"`
 	DeltaX         float64  `json:"deltaX,omitempty"`
 	DeltaY         float64  `json:"deltaY,omitempty"`
 	FullPage       bool     `json:"fullPage,omitempty"`
@@ -65,6 +66,7 @@ type browserArgs struct {
 	TimeoutMs      int      `json:"timeoutMs,omitempty"`
 	Headless       *bool    `json:"headless,omitempty"`
 	Visible        bool     `json:"visible,omitempty"`
+	WaitSelector   string   `json:"waitSelector,omitempty"`
 }
 
 func handleBrowser(ctx context.Context, argsJSON string) (string, error) {
@@ -292,8 +294,26 @@ func handleBrowser(ctx context.Context, argsJSON string) (string, error) {
 		}
 		return jsonStr(result)
 
+	case "render":
+		if args.HTML == "" {
+			return "", fmt.Errorf("browser render: html is required")
+		}
+		result, err := c.Render(browser.RenderRequest{
+			HTML:         args.HTML,
+			Selector:     args.Selector,
+			WaitSelector: args.WaitSelector,
+			TimeoutMs:    args.TimeoutMs,
+		})
+		if err != nil {
+			return "", err
+		}
+		return jsonStr(map[string]any{
+			"path":   result.Path,
+			"webUrl": result.WebURL,
+		})
+
 	default:
-		return "", fmt.Errorf("browser: unknown action %q. Valid actions: launch, close, navigate, snapshot, screenshot, click, type, select, scroll, drag, hover, press_key, wait, evaluate, tabs, tab_open, tab_close, solve_slider_captcha", args.Action)
+		return "", fmt.Errorf("browser: unknown action %q. Valid actions: launch, close, navigate, snapshot, screenshot, click, type, select, scroll, drag, hover, press_key, wait, evaluate, tabs, tab_open, tab_close, solve_slider_captcha, render", args.Action)
 	}
 }
 

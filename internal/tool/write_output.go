@@ -109,16 +109,23 @@ func handleOutputFile(ctx context.Context, argsJSON string) (string, error) {
 		var dl struct {
 			DownloadURL string `json:"download_url"`
 			ExpiresIn   int    `json:"expires_in"`
+			WebURL      string `json:"webUrl"`
 		}
 		if err := json.Unmarshal([]byte(dlResult), &dl); err != nil {
 			return writeResult, nil
 		}
-		result, _ := json.Marshal(map[string]any{
+		out := map[string]any{
 			"path":         written.Path,
 			"rel_path":     written.RelPath,
 			"download_url": dl.DownloadURL,
 			"expires_in":   dl.ExpiresIn,
-		})
+		}
+		// 仅图片文件返回 webUrl（由 file_serve.go 的 isImagePath 判断后设置）。
+		// 非图片文件不返回 webUrl，避免 agent.go 误推送（有 render action 后 LLM 不再需要自行 navigate）。
+		if dl.WebURL != "" {
+			out["webUrl"] = dl.WebURL
+		}
+		result, _ := json.Marshal(out)
 		return string(result), nil
 	case "download":
 		return handleServeFileDownload(ctx, argsJSON)

@@ -556,7 +556,7 @@ footer {
 
   /* Responsive inline images */
   .msg-img,
-  .bubble-text img { max-width: min(280px, calc(100vw - 96px)); }
+  .bubble-text img { max-width: min(400px, calc(100vw - 96px)); max-height: 360px; }
 
   /* Larger option / confirm buttons */
   .opt-btn  { padding: 11px 14px; font-size: .95rem; }
@@ -592,8 +592,8 @@ footer {
 
 /* ── Inline images ───────────────────────────────────────────────── */
 .msg-img, .bubble-text img {
-  max-width: 280px;
-  max-height: 280px;
+  max-width: min(520px, calc(100vw - 96px));
+  max-height: 480px;
   border-radius: var(--r-sm);
   display: block;
   margin: 4px 0;
