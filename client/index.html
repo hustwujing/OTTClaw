@@ -1099,14 +1099,9 @@ async function streamSSE(message, bubble, signal) {
             if (!chunk) break;
             rmTyping(bubble);
             textBuf += chunk;
-            if (!renderScheduled) {
-              renderScheduled = true;
-              requestAnimationFrame(() => {
-                renderMD(bubble, textBuf);
-                scrollEnd();
-                renderScheduled = false;
-              });
-            }
+            appendStreamChunk(bubble, chunk); // O(1) 文本节点追加
+            scrollEnd();
+            await yieldToMain(); // 让出主线程，给浏览器一次绘制机会，避免多 chunk 批量刷出
             break;
           }
 
@@ -1447,6 +1442,38 @@ function msgs()      { return document.getElementById('msgs'); }
 function scrollEnd() { const m = msgs(); m.scrollTop = m.scrollHeight; }
 function escHtml(s)  { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// yieldToMain: 通过 MessageChannel 让出主线程（task 边界，非 microtask），
+// 给浏览器一次真正的绘制机会，使流式 chunk 逐个显示而非批量刷出。
+const _yieldCh = new MessageChannel();
+function yieldToMain() {
+  return new Promise(resolve => {
+    _yieldCh.port1.onmessage = resolve;
+    _yieldCh.port2.postMessage(undefined);
+  });
+}
+
+// appendStreamChunk: 将 chunk 以文本节点追加到 bubble 的流式容器（O(1)）。
+// 在流式阶段调用，end 事件时再由 renderMD 统一替换为 markdown 渲染结果。
+function appendStreamChunk(bubble, chunk) {
+  let tc = bubble.querySelector('.bubble-text');
+  if (!tc) {
+    tc = document.createElement('div');
+    tc.className = 'bubble-text';
+    const procLog = bubble.querySelector('.proc-log');
+    procLog ? procLog.insertAdjacentElement('afterend', tc)
+            : bubble.insertBefore(tc, bubble.firstChild);
+  }
+  let streamEl = tc.querySelector('.stream-raw');
+  if (!streamEl) {
+    tc.innerHTML = '';
+    streamEl = document.createElement('span');
+    streamEl.className = 'stream-raw';
+    streamEl.style.cssText = 'white-space:pre-wrap;word-break:break-word;';
+    tc.appendChild(streamEl);
+  }
+  streamEl.appendChild(document.createTextNode(chunk));
+}
+
 // ── Server-initiated push (cron) ─────────────────────────────────────────
 function subscribeNotify(sessionId) {
   if (S.notifySource) { S.notifySource.close(); S.notifySource = null; }
@@ -1469,7 +1496,7 @@ function subscribeNotify(sessionId) {
         if (!bubble) break;
         rmTyping(bubble);
         textBuf += (ev.content || '');
-        renderMD(bubble, textBuf);
+        appendStreamChunk(bubble, ev.content || '');
         scrollEnd();
         break;
       case 'progress':

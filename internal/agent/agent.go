@@ -391,6 +391,11 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		// 情况 A：无工具调用 → 普通回答，保存并结束循环
 		if len(toolCalls) == 0 {
 			assistantText := textBuf.String()
+			// LLM 返回了空文字（无工具调用、无文字），补充 fallback 提示避免无声结束
+			if assistantText == "" {
+				assistantText = "（我已完成处理，但没有返回说明。如果结果不符合预期，请重新描述你的需求。）"
+				_ = writer.WriteText(assistantText)
+			}
 			if err := storage.AddMessage(userID, sessionID, "assistant", assistantText, "", "", ""); err != nil {
 				logger.Error("agent", userID, sessionID, "save assistant message failed", err, 0)
 			}
@@ -589,11 +594,20 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		// 继续下一轮 LLM 调用
 	}
 
-	// 超过最大迭代次数
-	errMsg := fmt.Sprintf("agent loop exceeded max iterations (%d)", maxIterations)
-	logger.Error("agent", userID, sessionID, errMsg, fmt.Errorf(errMsg), time.Since(start))
-	_ = writer.WriteError(errMsg)
-	return fmt.Errorf(errMsg)
+	// 超过最大迭代次数：以友好的助手消息告知用户，而非 error pill
+	overLimitErr := fmt.Errorf("agent loop exceeded max iterations (%d)", maxIterations)
+	logger.Error("agent", userID, sessionID, overLimitErr.Error(), overLimitErr, time.Since(start))
+	friendlyMsg := fmt.Sprintf(
+		"这次任务涉及的步骤太多，我在 %d 轮操作后仍未完成。建议把任务拆成更小的部分后重试，或换一种方式描述你的需求。",
+		maxIterations,
+	)
+	if err := storage.AddMessage(userID, sessionID, "assistant", friendlyMsg, "", "", ""); err != nil {
+		logger.Error("agent", userID, sessionID, "save over-limit message failed", err, 0)
+	}
+	go func() { _ = storage.AddOriginMessage(userID, sessionID, "assistant", friendlyMsg, nil) }()
+	_ = writer.WriteText(friendlyMsg)
+	_ = writer.WriteEnd()
+	return overLimitErr
 }
 
 // ----- 内部辅助函数 -----
@@ -655,6 +669,7 @@ Universal: These rules are absolute and apply to all roles and scenarios without
 
 # Available Tools
 Refer to the parameter descriptions in the tool definitions for usage. If unsure, call get_tool_doc(name) to view the tool's detailed documentation.
+In conversation history, user messages prefixed with "[工具 X 结果]:" are historical tool results stored for context — do NOT output text in this format yourself; always invoke tools via the real tool-calling interface.
 
 %s
 
@@ -994,14 +1009,16 @@ func logUserInput(input string) string {
 }
 
 // flattenHistoryToolCalls 将历史消息中所有 (assistant+ToolCalls, tool...) 组合
-// 扁平化为纯文本 assistant 消息，消除历史上下文中的 tool_use block。
-//
-// 背景：Anthropic API 要求 tool_use.id 严格匹配 ^[a-zA-Z0-9_-]+$。
-// 若历史消息经过压缩/重建后 ID 出现任何偏差（空串、非法字符），将触发 400 错误。
-// 扁平化后历史上下文只含纯文本，彻底规避此类问题。
+// 扁平化，消除历史上下文中的 tool_use block，防止两类问题：
+//  1. Anthropic API 要求 tool_use.id 严格匹配 ^[a-zA-Z0-9_-]+$，
+//     历史消息压缩/重建后 ID 出现偏差会触发 400 错误。
+//  2. 若将工具结果嵌入 assistant 消息，LLM 会学习并模仿该格式，
+//     在后续响应中直接输出 "[调用 X] → result" 文本，而不再真正调用工具。
 //
 // 处理规则：
-//   - assistant+ToolCalls + 后续 tool 消息 → 合并为单条纯文本 assistant 消息
+//   - assistant+ToolCalls → 纯文本 assistant 消息（仅保留原始文本；若为空则用 "..." 占位）
+//   - 对应的 tool 消息 → 独立的 user 消息（"[工具 name 结果]: content"）
+//   - 相邻 user 消息合并（满足 LLM 角色交替要求）
 //   - 孤立 tool 消息（正常不应出现） → 转为 user 消息，加 "[工具结果]" 前缀
 //   - msgs[0]（system prompt）及其他消息原样保留
 //
@@ -1011,55 +1028,71 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 	if len(msgs) <= 1 {
 		return msgs
 	}
-	result := make([]llm.ChatMessage, 0, len(msgs))
-	result = append(result, msgs[0]) // system prompt 原样保留
+	// 第一遍：将 (assistant+ToolCalls, tool...) 组展开为多条消息。
+	// assistant 只保留原始文本（不附加任何工具名称），工具结果单独转为 user 消息。
+	raw := make([]llm.ChatMessage, 0, len(msgs)*2)
+	raw = append(raw, msgs[0]) // system prompt 原样保留
 	i := 1
 	for i < len(msgs) {
 		m := msgs[i]
 		switch {
 		case m.Role == "assistant" && len(m.ToolCalls) > 0:
-			// 收集紧随其后的所有 tool 消息，按 ToolCallID 建立映射
-			toolContents := make(map[string]string, len(m.ToolCalls))
+			// 定位紧随其后的所有 tool 消息
 			j := i + 1
 			for j < len(msgs) && msgs[j].Role == "tool" {
-				toolContents[msgs[j].ToolCallID] = msgs[j].Content
 				j++
 			}
-			// 合并为纯文本：原始文本 + 每个工具调用结果摘要
-			var sb strings.Builder
-			if m.Content != "" {
-				sb.WriteString(m.Content)
-				sb.WriteString("\n")
+			// assistant 消息：仅保留原始文本，不附加任何工具名称标注。
+			// 若附加"[调用工具: xxx]"，LLM 会学习并在后续回复中模仿输出该文本，
+			// 导致真正的工具调用被文字替代（与工具名无关，只要看起来像"我要调用工具"就会被模仿）。
+			// 若原文为空（纯工具调用轮），用最短的占位符"..."维持角色交替，避免 user-user 相邻。
+			assistantContent := strings.TrimSpace(m.Content)
+			if assistantContent == "" {
+				assistantContent = "..."
 			}
-			for _, tc := range m.ToolCalls {
-				sb.WriteString("[调用 ")
-				sb.WriteString(tc.Function.Name)
-				sb.WriteString("] → ")
-				if content, ok := toolContents[tc.ID]; ok {
-					sb.WriteString(truncateToolResultForHistory(content))
-				} else {
-					sb.WriteString("(无结果)")
-				}
-				sb.WriteString("\n")
-			}
-			result = append(result, llm.ChatMessage{
+			raw = append(raw, llm.ChatMessage{
 				Role:    "assistant",
-				Content: strings.TrimSpace(sb.String()),
+				Content: assistantContent,
 			})
+			// 建立 ToolCallID → Content 映射
+			toolContents := make(map[string]string, j-i-1)
+			for k := i + 1; k < j; k++ {
+				toolContents[msgs[k].ToolCallID] = msgs[k].Content
+			}
+			// 每个工具结果转为独立 user 消息
+			for _, tc := range m.ToolCalls {
+				content := "(无结果)"
+				if c, ok := toolContents[tc.ID]; ok {
+					content = truncateToolResultForHistory(c)
+				}
+				raw = append(raw, llm.ChatMessage{
+					Role:    "user",
+					Content: "[工具 " + tc.Function.Name + " 结果]: " + content,
+				})
+			}
 			i = j // 跳过已消费的 tool 消息
 
 		case m.Role == "tool":
 			// 孤立 tool 消息（防御性处理，正常流程不应出现）
-			// 转为 user 消息，避免向 Anthropic 发送没有前驱 tool_use 的 tool_result
-			result = append(result, llm.ChatMessage{
+			raw = append(raw, llm.ChatMessage{
 				Role:    "user",
 				Content: "[工具结果] " + m.Content,
 			})
 			i++
 
 		default:
-			result = append(result, m)
+			raw = append(raw, m)
 			i++
+		}
+	}
+
+	// 第二遍：合并相邻的 user 消息，满足 LLM 的角色交替要求。
+	result := make([]llm.ChatMessage, 0, len(raw))
+	for _, msg := range raw {
+		if len(result) > 0 && result[len(result)-1].Role == "user" && msg.Role == "user" {
+			result[len(result)-1].Content += "\n" + msg.Content
+		} else {
+			result = append(result, msg)
 		}
 	}
 	return result

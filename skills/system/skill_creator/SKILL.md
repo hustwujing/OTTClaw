@@ -99,11 +99,11 @@ Based on the user's described purpose, **draft a complete workflow for the CONTE
 
 After drafting, present the complete draft to the user and ask if any changes are needed. Iterate until the user is satisfied.
 
-**Once the user is satisfied with everything**, first perform the English translation (Step Four Point Five), then save to KV, and then proceed to Step Five.
+**Once the user is satisfied with everything**, perform English translation (Step Four Point Five), then trim for token efficiency (Step Four Point Six, which also saves to KV), then proceed to Step Five.
 
 ---
 
-### Step Four Point Five(must do): Translate to English
+### Step Four Point Five (must do): Translate to English
 
 Before saving to KV, translate all file content to English to reduce token costs on every subsequent invocation.
 
@@ -121,16 +121,33 @@ Before saving to KV, translate all file content to English to reduce token costs
 - Tool names (`skill`, `kv`, etc.) and parameter names
 - **Reference files and asset files**: these files contain example/reference materials that must strictly follow the user's own language and format preferences — do NOT translate them
 
-After translation, replace the original draft with the translated version. No need to show the diff to the user — proceed directly to the next step to save to KV.
+After translation, replace the original draft with the translated version. No need to show the diff to the user — proceed directly to Step Four Point Six.
+
+---
+
+### Step Four Point Six (must do): Trim SKILL.md for Token Efficiency
+
+SKILL.md CONTENT is loaded on every invocation — every unnecessary word permanently increases per-use cost. After translation, rewrite only the SKILL.md CONTENT to minimize length while keeping all functional instructions intact.
+
+**Apply these rules:**
+
+- **Remove meta-commentary**: delete sentences that explain what the next sentence says (e.g. "In this step, we will…").
+- **Use direct imperatives**: replace "You should do X in order to achieve Y" with "Do X."
+- **Remove hedging**: delete "if possible", "try to", "note that", "keep in mind that", "remember that".
+- **Trim examples**: keep at most one minimal example per concept; remove examples that merely repeat what the instruction already says.
+- **Collapse bullets**: if a bullet point has only one sub-item, merge them into a single line.
+- **No duplication**: remove any content already covered in Notes, reference files, or asset files.
+
+Do not trim script files, reference files, or asset files — only the SKILL.md CONTENT section.
+
+After trimming, save all content to KV and immediately proceed to Step Five:
 
 ```
-kv(action=set, key="_draft_skill_md",    value=<complete SKILL.md text translated to English>)
+kv(action=set, key="_draft_skill_md",    value=<complete SKILL.md text — translated and trimmed>)
 kv(action=set, key="_draft_scripts",     value=<JSON array, each item {"name":"...", "content":"..."} (content translated), pass [] if no scripts>)
 kv(action=set, key="_draft_references",  value=<JSON array, each item {"name":"...", "content":"..."} (content kept in original language, NOT translated), pass [] if no reference files>)
 kv(action=set, key="_draft_assets",      value=<JSON array, each item {"name":"...", "content":"..."} (content kept in original language, NOT translated), pass [] if no asset files>)
 ```
-
-Once KV is saved, immediately proceed to Step Five.
 
 ---
 
