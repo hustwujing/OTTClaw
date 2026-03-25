@@ -70,6 +70,7 @@ func withAppIDCtx(ctx context.Context, appID string) context.Context {
 
 type registry struct {
 	mu      sync.Mutex
+	stopped bool
 	cancels map[string]context.CancelFunc // userID → cancel
 }
 
@@ -97,6 +98,10 @@ func (r *registry) StartAll(ctx context.Context) {
 // StartForUser 为指定用户启动（或重启）飞书长连接
 func (r *registry) StartForUser(ctx context.Context, ownerUserID string, cfg *storage.FeishuConfig) {
 	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
 	if cancel, ok := r.cancels[ownerUserID]; ok {
 		cancel()
 	}
@@ -125,9 +130,11 @@ func (r *registry) StopForUser(ownerUserID string) {
 }
 
 // StopAll 停止所有飞书长连接（服务关闭时调用）
+// 调用后 StartForUser 将成为 no-op，防止 shutdown 窗口期创建新 goroutine
 func (r *registry) StopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.stopped = true
 	for uid, cancel := range r.cancels {
 		cancel()
 		delete(r.cancels, uid)
@@ -207,7 +214,8 @@ func makeMessageHandler(botCtx context.Context, ownerUserID, appID string) func(
 		// 异步处理，不阻塞事件循环（飞书要求 3s 内返回）
 		go func() {
 			// 幂等保护：飞书在服务超时/网络抖动时会重发相同 message_id 的事件，直接丢弃重复投递
-			if isDuplicateMessage(messageID) {
+			// messageID 为空时无法去重，直接放行（避免把合法消息误判为重复）
+			if messageID != "" && isDuplicateMessage(messageID) {
 				logger.Info("feishu", ownerUserID, "", fmt.Sprintf("dedup: skipping duplicate message_id=%s", messageID), 0)
 				return
 			}
