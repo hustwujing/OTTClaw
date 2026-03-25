@@ -1500,21 +1500,21 @@ Existing self-improving skills (update if relevant, create new if no match):
 
 If worth saving, call the skill tool:
 1. skill(action=write, skill_id=<id>, content=<SKILL.md>)
-2. [Optional] skill(action=write, skill_id=<id>, sub_path="script/<name>.py",       content=<code>)
-3. [Optional] skill(action=write, skill_id=<id>, sub_path="references/<name>.md",   content=<doc>)
-4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",          content=<data>)
+2. [Optional] skill(action=write, skill_id=<id>, sub_path="script/<name>.py",     content=<code>)
+3. [Optional] skill(action=write, skill_id=<id>, sub_path="references/<name>.md", content=<doc>)
+4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",        content=<data>)
 5. skill(action=reload)  — must call after all files are written
 
-SKILL.md format:
+SKILL.md format (ALL fields in English except display_name; be concise — every word counts):
 ==============================
 skill_id: <snake_case_id>
 name: <SkillName>
 display_name: <中文展示名>
-description: <one-line description>
-trigger: <when to use this skill>
+description: <one-line, ≤30 words>
+trigger: <when to use, ≤30 words>
 enable: true
 ==============================
-<detailed workflow in markdown>
+<workflow: bullet points only, no prose, no redundant headings>
 
 If nothing is worth saving, reply: SKIP`
 
