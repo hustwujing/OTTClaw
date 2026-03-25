@@ -1290,6 +1290,18 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 		return "", fmt.Errorf("sub_path must start with \"script/\", \"assets/\", or \"references/\", got: %q%s", args.SubPath, hint)
 	}
 
+	// 辅助文件写入时，优先使用技能在 store 中的实际 RootPath。
+	// 这样 self-improving/skills/{id}/ 和普通 users/{userID}/{id}/ 都能正确定位，
+	// 无需在此处硬编码具体目录结构。
+	// 技能不存在时（尚未 reload）回退到 resolveSkillBaseDir 拼接路径。
+	if actualSkillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
+		absActualSkillDir, err := filepath.Abs(actualSkillDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve skill dir: %w", err)
+		}
+		absSkillDir = absActualSkillDir
+	}
+
 	targetPath := filepath.Clean(filepath.Join(absSkillDir, args.SubPath))
 	absTargetPath, err := filepath.Abs(targetPath)
 	if err != nil {
@@ -1349,7 +1361,14 @@ func handleWriteSkillScript(ctx context.Context, argsJSON string) (string, error
 		return "", fmt.Errorf("resolve skills base dir: %w", err)
 	}
 
-	scriptDir := filepath.Join(absBaseDir, args.SkillID, "script")
+	absSkillDir := filepath.Join(absBaseDir, args.SkillID)
+	if actualSkillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
+		if abs, err := filepath.Abs(actualSkillDir); err == nil {
+			absSkillDir = abs
+		}
+	}
+
+	scriptDir := filepath.Join(absSkillDir, "script")
 	scriptPath := filepath.Clean(filepath.Join(scriptDir, args.ScriptName))
 
 	absScriptDir, err := filepath.Abs(scriptDir)
@@ -1414,7 +1433,14 @@ func handleWriteSkillAsset(ctx context.Context, argsJSON string) (string, error)
 		return "", fmt.Errorf("resolve skills base dir: %w", err)
 	}
 
-	assetsDir := filepath.Join(absBaseDir, args.SkillID, "assets")
+	absSkillDir := filepath.Join(absBaseDir, args.SkillID)
+	if actualSkillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
+		if abs, err := filepath.Abs(actualSkillDir); err == nil {
+			absSkillDir = abs
+		}
+	}
+
+	assetsDir := filepath.Join(absSkillDir, "assets")
 	assetPath := filepath.Clean(filepath.Join(assetsDir, args.AssetName))
 
 	absAssetsDir, err := filepath.Abs(assetsDir)

@@ -132,6 +132,29 @@ func (s *store) LoadAll(dir string) error {
 				}
 			}
 
+			// -- 加载 self-improving 自动生成技能 --
+			selfImprovingDir := filepath.Join(userDir, "self-improving", "skills")
+			if siEntries, err := os.ReadDir(selfImprovingDir); err == nil {
+				for _, e := range siEntries {
+					if !e.IsDir() {
+						continue
+					}
+					skillDir := filepath.Join(selfImprovingDir, e.Name())
+					mdPath := filepath.Join(skillDir, "SKILL.md")
+					if _, err := os.Stat(mdPath); os.IsNotExist(err) {
+						continue
+					}
+					sk, err := parseSkillFile(mdPath, skillDir)
+					if err != nil {
+						return fmt.Errorf("parse self-improving skill in %q: %w", skillDir, err)
+					}
+					if !sk.Enable {
+						continue
+					}
+					userSkillMap[sk.SkillID] = sk
+				}
+			}
+
 			if len(userSkillMap) > 0 {
 				newUsers[userID] = userSkillMap
 			}

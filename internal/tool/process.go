@@ -126,8 +126,9 @@ func processList() (string, error) {
 
 // ── poll ──────────────────────────────────────────────────────────────────────
 
-// processPoll 等待新输出，最多 timeout ms。返回增量输出（自上次 drain 以来的新内容）。
-// 若进程已完成则直接返回完整结果。
+// processPoll 等待进程完成或 timeoutMs 到期，批量返回期间所有增量输出。
+// 修复：不再在有新输出时立即返回（避免 npm install 等频繁输出的命令快速消耗 LLM 迭代次数）。
+// 每次 poll 最多阻塞 timeoutMs，期间所有新输出在超时/完成时一次性返回给 LLM。
 func processPoll(sessionID string, timeoutMs int) (string, error) {
 	sess, err := lookupSession(sessionID)
 	if err != nil {
@@ -142,53 +143,28 @@ func processPoll(sessionID string, timeoutMs int) (string, error) {
 	}
 
 	if timeoutMs <= 0 {
-		timeoutMs = 5000
+		timeoutMs = 10000 // 默认 10s（原为 5s）
 	}
-	if timeoutMs > 30000 {
-		timeoutMs = 30000
+	if timeoutMs > 60000 {
+		timeoutMs = 60000 // 最大 60s（原为 30s）
 	}
 
-	// 先清空当前增量缓冲
-	initial := sess.drainOutput()
-	if initial != "" {
+	// 等待进程完成 or 超时；期间输出由 sess 内部双缓冲持续收集
+	timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case <-sess.doneCh:
+		return execDoneResult(sess), nil
+
+	case <-timer.C:
 		return execMarshal(map[string]any{
 			"status":      "running",
 			"session_id":  sess.id,
-			"new_output":  initial,
+			"new_output":  sess.drainOutput(),
 			"elapsed_sec": int(time.Since(sess.startedAt).Seconds()),
+			"hint":        fmt.Sprintf("Command still running after %ds. Call process(action='poll') again to keep waiting.", timeoutMs/1000),
 		}), nil
-	}
-
-	// 等待：进程完成 or 有新输出 or 超时
-	timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
-	defer timer.Stop()
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-sess.doneCh:
-			return execDoneResult(sess), nil
-
-		case <-ticker.C:
-			if out := sess.drainOutput(); out != "" {
-				return execMarshal(map[string]any{
-					"status":      "running",
-					"session_id":  sess.id,
-					"new_output":  out,
-					"elapsed_sec": int(time.Since(sess.startedAt).Seconds()),
-				}), nil
-			}
-
-		case <-timer.C:
-			return execMarshal(map[string]any{
-				"status":      "running",
-				"session_id":  sess.id,
-				"new_output":  sess.drainOutput(),
-				"elapsed_sec": int(time.Since(sess.startedAt).Seconds()),
-				"hint":        fmt.Sprintf("No new output in %dms. Call process(action='poll') again to keep waiting.", timeoutMs),
-			}), nil
-		}
 	}
 }
 

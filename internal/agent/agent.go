@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -93,6 +94,9 @@ func GetRoleName() string {
 
 // singleton 全局 Agent 实例，服务启动后初始化
 var singleton *Agent
+
+// selfImprovingSkillIDRegex 校验自进化 skill_id 格式（仅小写字母、数字、下划线）
+var selfImprovingSkillIDRegex = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // Init 初始化全局 Agent（服务启动时调用一次）
 func Init() error {
@@ -182,6 +186,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	// LLM 循环：最多执行 N 轮，防止无限循环（AGENT_MAX_ITERATIONS，默认 20）
 	maxIterations := config.Cfg.AgentMaxIterations
 	hasCompressed := false // 每次 Run() 只允许压缩一次，防止「压缩 → 工具执行 → 再次超限 → 再压缩」循环
+	toolCallIters := 0     // 有工具调用的迭代轮次数，用于判断是否触发自我进化技能生成
 	for iter := 0; iter < maxIterations; iter++ {
 		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
 		if !hasCompressed {
@@ -357,6 +362,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			go func(text string) { _ = storage.AddOriginMessage(userID, sessionID, "assistant", text, nil) }(assistantText)
 			// 异步：在第 3 轮对话完成后生成会话 AI 标题
 			go a.maybeGenerateTitle(sessionID)
+			if config.Cfg.SelfImprovingMinToolIters > 0 && toolCallIters >= config.Cfg.SelfImprovingMinToolIters {
+				go a.maybeCreateSelfImprovingSkill(userID, sessionID, messages)
+			}
 			logger.Debug("agent", userID, sessionID,
 				fmt.Sprintf("agent loop end: normal answer, total_iter=%d cost=%dms",
 					iter+1, time.Since(start).Milliseconds()), 0)
@@ -365,6 +373,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		}
 
 		// 情况 B：有工具调用 → 保存 assistant 消息，执行工具后继续循环
+		toolCallIters++
 
 		// --- DB 保存 assistant 消息：只过滤 notify(action=progress)（纯进度通知，无语义） ---
 		// notify(action=options/confirm) 虽然是交互工具，但有语义——它们代表"等待用户决策"节点，
@@ -1476,4 +1485,305 @@ func buildMessages(systemPrompt string, dbMsgs []storage.SessionMessage) []llm.C
 	// 当前轮在 agent 循环中 in-memory 新增的 tool call 消息不经过此函数，仍保留结构化格式。
 	msgs = flattenHistoryToolCalls(msgs)
 	return msgs
+}
+
+// _SKILL_REVIEW_PROMPT_TMPL 审查对话，决定是否生成/更新技能。
+// 第一个 %s 注入已有自进化 skill 列表。
+const _SKILL_REVIEW_PROMPT_TMPL = `Review the conversation above. Decide if a reusable skill should be created or updated.
+
+Create or update a skill if:
+- A non-trivial, multi-step approach was used that required tool usage
+- The solution has clear reuse value for similar future tasks
+
+Existing self-improving skills (update if relevant, create new if no match):
+%s
+
+If worth saving, call the skill tool:
+1. skill(action=write, skill_id=<id>, content=<SKILL.md>)
+2. [Optional] skill(action=write, skill_id=<id>, sub_path="script/<name>.py",       content=<code>)
+3. [Optional] skill(action=write, skill_id=<id>, sub_path="references/<name>.md",   content=<doc>)
+4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",          content=<data>)
+5. skill(action=reload)  — must call after all files are written
+
+SKILL.md format:
+==============================
+skill_id: <snake_case_id>
+name: <SkillName>
+display_name: <中文展示名>
+description: <one-line description>
+trigger: <when to use this skill>
+enable: true
+==============================
+<detailed workflow in markdown>
+
+If nothing is worth saving, reply: SKIP`
+
+// maybeCreateSelfImprovingSkill 在后台审查会话，若有价值则通过 mini agent loop
+// 自动生成或更新技能文件（支持多文件：SKILL.md + script/references/assets）。
+// 在有工具调用的对话结束后异步调用（go ...），不阻塞主流程。
+// messages 为 Run() 循环结束时的 in-memory 消息切片，包含完整工具调用和结果。
+func (a *Agent) maybeCreateSelfImprovingSkill(userID, sessionID string, messages []llm.ChatMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	logger.Debug("agent", userID, sessionID,
+		fmt.Sprintf("[self-improving] start: %d messages in session", len(messages)), 0)
+
+	// 序列化对话历史（跳过 system prompt）
+	var conv strings.Builder
+	for _, m := range messages {
+		switch m.Role {
+		case "system":
+			continue
+		case "assistant":
+			if m.Content != "" {
+				conv.WriteString(fmt.Sprintf("[assistant]\n%s\n\n", m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				conv.WriteString(fmt.Sprintf("[assistant → tool_call: %s]\n%s\n\n",
+					tc.Function.Name, tc.Function.Arguments))
+			}
+		case "tool":
+			conv.WriteString(fmt.Sprintf("[tool_result: %s]\n%s\n\n", m.Name, m.Content))
+		default:
+			conv.WriteString(fmt.Sprintf("[%s]\n%s\n\n", m.Role, m.Content))
+		}
+	}
+
+	// 注入已有自进化 skill 列表（仅 self-improving 目录）
+	existingHeads := getSelfImprovingSkillHeads(userID)
+	existingText := "(none)"
+	if len(existingHeads) > 0 {
+		existingText = skill.FormatHeadsForPrompt(existingHeads)
+	}
+	logger.Debug("agent", userID, sessionID,
+		fmt.Sprintf("[self-improving] existing skills: %s", existingText), 0)
+
+	reviewMessages := []llm.ChatMessage{{
+		Role:    "user",
+		Content: conv.String() + "\n\n---\n\n" + fmt.Sprintf(_SKILL_REVIEW_PROMPT_TMPL, existingText),
+	}}
+	miniTools := []llm.Tool{selfImprovingSkillTool()}
+
+	// 固定写入目录：self-improving/skills/
+	siBaseDir := filepath.Join(skill.Store.GetUserSkillsDir(userID), "self-improving", "skills")
+	logger.Debug("agent", userID, sessionID,
+		fmt.Sprintf("[self-improving] target dir: %s", siBaseDir), 0)
+
+	const maxIter = 8
+	for i := 0; i < maxIter; i++ {
+		logger.Debug("agent", userID, sessionID,
+			fmt.Sprintf("[self-improving] iter=%d: calling LLM, history=%d msgs", i, len(reviewMessages)), 0)
+		eventCh, err := a.llmClient.ChatStream(context.Background(), reviewMessages, miniTools)
+		if err != nil {
+			logger.Warn("agent", userID, sessionID,
+				fmt.Sprintf("[self-improving] iter=%d: LLM error: %v", i, err), 0)
+			return
+		}
+
+		var textBuf strings.Builder
+		var toolCalls []llm.ToolCall
+		for ev := range eventCh {
+			if ev.Error != nil {
+				logger.Warn("agent", userID, sessionID,
+					fmt.Sprintf("[self-improving] iter=%d: stream error: %v", i, ev.Error), 0)
+				return
+			}
+			if ev.Done {
+				break
+			}
+			if ev.TextChunk != "" {
+				textBuf.WriteString(ev.TextChunk)
+			}
+			if len(ev.ToolCalls) > 0 {
+				toolCalls = ev.ToolCalls
+			}
+		}
+
+		// 无工具调用 → LLM 已完成（SKIP 或说明文字）
+		if len(toolCalls) == 0 {
+			text := strings.TrimSpace(textBuf.String())
+			logger.Debug("agent", userID, sessionID,
+				fmt.Sprintf("[self-improving] iter=%d: no tool calls, LLM text=%q", i, truncate(text, 120)), 0)
+			if text != "" && text != "SKIP" {
+				logger.Info("agent", userID, sessionID,
+					"self-improving review: "+truncate(text, 80), 0)
+			}
+			return
+		}
+		logger.Debug("agent", userID, sessionID,
+			fmt.Sprintf("[self-improving] iter=%d: %d tool call(s) received", i, len(toolCalls)), 0)
+
+		// 先执行所有工具、收集结果，再追加消息。
+		// 这样 stripToolCallContent 标记 "[N bytes, written]" 时已知写入是否成功，
+		// LLM 在下一轮看到的 assistant 消息与 tool result 保持一致。
+		type tcResult struct {
+			tc     llm.ToolCall
+			result string
+		}
+		var tcResults []tcResult
+		for _, tc := range toolCalls {
+			var result string
+			if tc.Function.Name == "skill" {
+				result = execSelfImprovingSkillTool(tc.Function.Arguments, siBaseDir)
+			} else {
+				result = `{"error":"tool not allowed in self-improving context"}`
+			}
+			logger.Debug("agent", userID, sessionID,
+				fmt.Sprintf("[self-improving iter=%d] tool=%s args=%s → %s",
+					i, tc.Function.Name,
+					truncate(tc.Function.Arguments, 120), truncate(result, 120)), 0)
+			tcResults = append(tcResults, tcResult{tc, result})
+		}
+
+		// 只对写入成功的 call 替换 content 为摘要；失败的保留原始 arguments，
+		// 方便 LLM 看到完整上下文后重试或放弃。
+		resultStrs := make([]string, len(tcResults))
+		for j, r := range tcResults {
+			resultStrs[j] = r.result
+		}
+		strippedCalls := stripToolCallContentSelective(toolCalls, resultStrs)
+		reviewMessages = append(reviewMessages, llm.ChatMessage{
+			Role:      "assistant",
+			Content:   textBuf.String(),
+			ToolCalls: strippedCalls,
+		})
+		for _, r := range tcResults {
+			reviewMessages = append(reviewMessages, llm.ChatMessage{
+				Role: "tool", ToolCallID: r.tc.ID, Name: r.tc.Function.Name,
+				Content: r.result,
+			})
+		}
+	}
+}
+
+// execSelfImprovingSkillTool 独立实现 self-improving mini agent 的 skill 工具执行逻辑。
+// 绕过 handleWriteSkillFile，固定写入 siBaseDir（self-improving/skills/），允许覆盖。
+func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
+	var args struct {
+		Action  string `json:"action"`
+		SkillID string `json:"skill_id"`
+		Content string `json:"content"`
+		SubPath string `json:"sub_path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf(`{"error":"parse args: %v"}`, err)
+	}
+	switch args.Action {
+	case "write":
+		if args.SkillID == "" || args.Content == "" {
+			return `{"error":"skill_id and content are required"}`
+		}
+		if !selfImprovingSkillIDRegex.MatchString(args.SkillID) {
+			return fmt.Sprintf(`{"error":"invalid skill_id %q"}`, args.SkillID)
+		}
+		skillDir := filepath.Join(siBaseDir, args.SkillID)
+		var targetPath string
+		if args.SubPath == "" || strings.EqualFold(args.SubPath, "SKILL.md") {
+			if _, err := skill.ParseContent(args.Content); err != nil {
+				return fmt.Sprintf(`{"error":"SKILL.md format error: %v"}`, err)
+			}
+			targetPath = filepath.Join(skillDir, "SKILL.md")
+		} else {
+			if !strings.HasPrefix(args.SubPath, "script/") &&
+				!strings.HasPrefix(args.SubPath, "references/") &&
+				!strings.HasPrefix(args.SubPath, "assets/") {
+				return `{"error":"sub_path must start with script/, references/, or assets/"}`
+			}
+			targetPath = filepath.Join(skillDir, filepath.Clean(args.SubPath))
+			if !strings.HasPrefix(targetPath, skillDir+string(filepath.Separator)) {
+				return `{"error":"sub_path escapes skill directory"}`
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return fmt.Sprintf(`{"error":"mkdir: %v"}`, err)
+		}
+		if err := os.WriteFile(targetPath, []byte(args.Content), 0o644); err != nil {
+			return fmt.Sprintf(`{"error":"write file: %v"}`, err)
+		}
+		return fmt.Sprintf(`{"ok":true,"path":"%s"}`, targetPath)
+	case "reload":
+		if err := skill.Store.Reload(); err != nil {
+			return fmt.Sprintf(`{"error":"reload: %v"}`, err)
+		}
+		return `{"ok":true,"message":"skills reloaded"}`
+	default:
+		return fmt.Sprintf(`{"error":"unknown action %q"}`, args.Action)
+	}
+}
+
+// getSelfImprovingSkillHeads 只枚举 self-improving/skills/ 下的 HEAD，
+// 不含用户手动创建的 skill，确保 LLM 只 update 自进化 skill。
+func getSelfImprovingSkillHeads(userID string) []skill.Head {
+	siDir := filepath.Join(skill.Store.GetUserSkillsDir(userID), "self-improving", "skills")
+	entries, err := os.ReadDir(siDir)
+	if err != nil {
+		return nil
+	}
+	var heads []skill.Head
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(siDir, e.Name(), "SKILL.md"))
+		if err != nil {
+			continue
+		}
+		sk, err := skill.ParseContent(string(data))
+		if err != nil {
+			continue
+		}
+		heads = append(heads, sk.Head)
+	}
+	return heads
+}
+
+// selfImprovingSkillTool 返回 mini agent 专用的精简工具定义（只暴露 write/reload）。
+func selfImprovingSkillTool() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name: "skill",
+			Description: "Save self-improving skill files. " +
+				"action=write: create/update SKILL.md (omit sub_path) or supporting file. " +
+				"action=reload: hot-reload after all files written.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":   map[string]any{"type": "string", "enum": []string{"write", "reload"}},
+					"skill_id": map[string]any{"type": "string"},
+					"content":  map[string]any{"type": "string"},
+					"sub_path": map[string]any{
+						"type":        "string",
+						"description": "Omit for SKILL.md. Or: script/<name> / references/<name> / assets/<name>",
+					},
+				},
+				"required": []string{"action"},
+			},
+		},
+	}
+}
+
+// stripToolCallContentSelective 只对写入成功的 tool call（results[i] 含 "ok":true）
+// 将 arguments 中的 content 替换为字节摘要；失败的保留原始 arguments。
+// 确保 assistant 消息与 tool result 在语义上一致。
+func stripToolCallContentSelective(calls []llm.ToolCall, results []string) []llm.ToolCall {
+	stripped := make([]llm.ToolCall, len(calls))
+	copy(stripped, calls)
+	for i, tc := range calls {
+		if i >= len(results) || !strings.Contains(results[i], `"ok":true`) {
+			continue // 失败或无结果：保留原始 arguments
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &m); err != nil {
+			continue
+		}
+		if raw, ok := m["content"].(string); ok && len(raw) > 0 {
+			m["content"] = fmt.Sprintf("[%d bytes, written]", len(raw))
+			if b, err := json.Marshal(m); err == nil {
+				stripped[i].Function.Arguments = string(b)
+			}
+		}
+	}
+	return stripped
 }

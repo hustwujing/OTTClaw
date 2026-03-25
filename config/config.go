@@ -7,10 +7,11 @@
 //
 // 优先级（从高到低）：
 //  1. 系统环境变量（export KEY=value 或 Docker/K8s 注入）
-//  2. .env 文件（项目根目录，开发本地使用）
-//  3. 代码内置默认值
+//  2. .env 文件（项目根目录，存放敏感密钥，不提交 git）
+//  3. config.yaml（项目根目录，存放非敏感配置，可提交 git）
+//  4. 代码内置默认值
 //
-// .env 文件不存在时静默跳过，不影响启动。
+// .env 和 config.yaml 文件不存在时静默跳过，不影响启动。
 package config
 
 import (
@@ -19,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/joho/godotenv"
+	"gopkg.in/yaml.v3"
 )
 
 // LLMEndpointConfig 单个 LLM 节点配置
@@ -97,8 +99,9 @@ type AppConfig struct {
 	NanoBananaModel   string // NANO_BANANA_MODEL：模型名称，默认 ppio/nano-banana-pro
 
 	// Agent 循环
-	AgentMaxIterations int    // AGENT_MAX_ITERATIONS：LLM 循环最大轮数，默认 20
-	ProgressLabel      string // PROGRESS_LABEL：进度事件的 step 标识，前端可展示，默认 "progress"
+	AgentMaxIterations        int    // AGENT_MAX_ITERATIONS：LLM 循环最大轮数，默认 20
+	ProgressLabel             string // PROGRESS_LABEL：进度事件的 step 标识，前端可展示，默认 "progress"
+	SelfImprovingMinToolIters int    // SELF_IMPROVING_MIN_TOOL_ITERS：触发自我进化技能生成所需的最少工具调用轮次，默认 3
 
 	// 浏览器自动化
 	BrowserServerPort   string // BROWSER_SERVER_PORT：Node.js Playwright sidecar 监听端口，默认 9222
@@ -141,6 +144,53 @@ var Cfg = loadConfig()
 // dotEnvCache 保存从 .env 文件读取的 KV（不写入 os 环境，避免污染子进程）
 var dotEnvCache map[string]string
 
+// yamlAppConfig 对应 config.yaml 结构，存放非敏感、可提交 git 的配置项。
+// 优先级低于系统环境变量和 .env 文件。
+type yamlAppConfig struct {
+	Log struct {
+		Level      string `yaml:"level"`
+		Dir        string `yaml:"dir"`
+		File       string `yaml:"file"`
+		DataMaxLen int    `yaml:"data_max_len"`
+	} `yaml:"log"`
+}
+
+// yamlCfgCache 保存从 config.yaml 读取的配置，文件不存在时为零值。
+var yamlCfgCache yamlAppConfig
+
+// loadYAMLConfig 读取 config.yaml；文件不存在或解析失败时静默跳过。
+func loadYAMLConfig(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	_ = yaml.Unmarshal(data, &yamlCfgCache)
+}
+
+// getEnvWithYAML 按优先级返回字符串配置：env var → .env → yaml → defaultVal。
+func getEnvWithYAML(key, yamlFallback, defaultVal string) string {
+	if v := getEnv(key, ""); v != "" {
+		return v
+	}
+	if yamlFallback != "" {
+		return yamlFallback
+	}
+	return defaultVal
+}
+
+// getEnvIntWithYAML 按优先级返回整型配置：env var → .env → yaml → defaultVal。
+func getEnvIntWithYAML(key string, yamlFallback, defaultVal int) int {
+	if s := getEnv(key, ""); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			return v
+		}
+	}
+	if yamlFallback != 0 {
+		return yamlFallback
+	}
+	return defaultVal
+}
+
 // loadLLMEndpoints 构建 LLM 节点列表。
 // 始终将主节点（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL）作为第一个元素，
 // 再依次扫描 LLM_BASE_URL_2、LLM_BASE_URL_3 ... LLM_BASE_URL_10，
@@ -178,6 +228,7 @@ func loadLLMEndpoints(primaryProvider string, primaryMaxTokens, primaryRPM int) 
 // loadConfig 按优先级读取所有配置项
 func loadConfig() *AppConfig {
 	loadDotEnv(".env")
+	loadYAMLConfig("config.yaml")
 
 	cfg := &AppConfig{
 		ServerPort:              getEnv("SERVER_PORT", "8080"),
@@ -195,10 +246,10 @@ func loadConfig() *AppConfig {
 		ToolMDPath:              getEnv("TOOL_MD_PATH", "config/TOOL.md"),
 		UploadDir:               getEnv("UPLOAD_DIR", "uploads"),
 		OutputDir:               getEnv("OUTPUT_DIR", "output"),
-		LogLevel:                getEnv("LOG_LEVEL", "info"),
-		LogDir:                  getEnv("LOG_DIR", ""),
-		LogFile:                 getEnv("LOG_FILE", ""),
-		LogDataMaxLen:           getEnvInt("LOG_DATA_MAX_LEN", 600),
+		LogLevel:                getEnvWithYAML("LOG_LEVEL", yamlCfgCache.Log.Level, "info"),
+		LogDir:                  getEnvWithYAML("LOG_DIR", yamlCfgCache.Log.Dir, ""),
+		LogFile:                 getEnvWithYAML("LOG_FILE", yamlCfgCache.Log.File, ""),
+		LogDataMaxLen:           getEnvIntWithYAML("LOG_DATA_MAX_LEN", yamlCfgCache.Log.DataMaxLen, 600),
 		LLMProvider:             getEnv("LLM_PROVIDER", "openai"),
 		LLMMaxTokens:            getEnvInt("LLM_MAX_TOKENS", 8096),
 		LLMRateLimit:            getEnvInt("LLM_RPM", 0),
@@ -212,8 +263,9 @@ func loadConfig() *AppConfig {
 		NanoBananaAPIKey:        getEnv("NANO_BANANA_API_KEY", ""),
 		NanoBananaBaseURL:       getEnv("NANO_BANANA_BASE_URL", "http://llmapi.bilibili.co/v1"),
 		NanoBananaModel:         getEnv("NANO_BANANA_MODEL", "ppio/nano-banana-pro"),
-		AgentMaxIterations:      getEnvInt("AGENT_MAX_ITERATIONS", 20),
-		ProgressLabel:           getEnv("PROGRESS_LABEL", "progress"),
+		AgentMaxIterations:        getEnvInt("AGENT_MAX_ITERATIONS", 20),
+		ProgressLabel:             getEnv("PROGRESS_LABEL", "progress"),
+		SelfImprovingMinToolIters: getEnvInt("SELF_IMPROVING_MIN_TOOL_ITERS", 3),
 		BrowserServerPort:       getEnv("BROWSER_SERVER_PORT", "9222"),
 		BrowserServerScript:     getEnv("BROWSER_SERVER_SCRIPT", "browser-server/server.js"),
 		BrowserHeadless:         getEnv("BROWSER_HEADLESS", "true") != "false",
