@@ -120,8 +120,8 @@ do_stop() {
   echo "[stop] 发送 SIGTERM 到 PID=$PID..."
   kill "$PID"
 
-  # 等待进程退出（最多 10 秒）
-  for i in $(seq 1 10); do
+  # 等待进程退出（最多 35 秒，覆盖 HTTP server 30s shutdown + bgWg 等待时间）
+  for i in $(seq 1 35); do
     if ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$PID_FILE"
       echo "[stop] 服务已停止（等待 ${i}s）"
@@ -132,7 +132,7 @@ do_stop() {
   done
 
   # 超时后强制杀死
-  echo "[stop] 进程未在 10s 内退出，发送 SIGKILL..."
+  echo "[stop] 进程未在 35s 内退出，发送 SIGKILL..."
   kill -9 "$PID" 2>/dev/null || true
   rm -f "$PID_FILE"
   echo "[stop] 服务已强制终止"

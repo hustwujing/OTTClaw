@@ -92,6 +92,16 @@ func SSE(c *gin.Context) {
 			return
 		case <-ticker.C:
 			writer.writeHeartbeat()
+		case <-agent.Get().ShutdownCh():
+			// 服务器正在关闭，主动取消 agent，使 srv.Shutdown() 能快速回收连接
+			logger.Info("sse", userID, sessionID, "sse server shutting down, cancelling agent", time.Since(start))
+			agentCancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				logger.Warn("sse", userID, sessionID, "agent goroutine stop timeout on server shutdown", time.Since(start))
+			}
+			return
 		case <-c.Request.Context().Done():
 			logger.Info("sse", userID, sessionID, "sse client disconnected", time.Since(start))
 			agentCancel() // 取消 agent context，使进行中的 browser HTTP 请求立即中止

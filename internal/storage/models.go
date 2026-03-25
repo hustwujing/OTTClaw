@@ -41,14 +41,15 @@ func (InviteCode) TableName() string { return "invite_codes" }
 
 // Session 会话表，存储会话元数据和 KV 上下文
 type Session struct {
-	SessionID  string    `gorm:"primaryKey;column:session_id"`
-	UserID     string    `gorm:"column:user_id;index;not null"`
-	KVData     string    `gorm:"column:kv_data;type:text"`    // JSON 格式的 KV 上下文
-	Title      string    `gorm:"column:title;default:''"`      // AI 生成的会话标题（空则前端用首条消息做预览）
-	Source     string    `gorm:"column:source;default:'web'"` // 来源：web | feishu
-	FeishuPeer string    `gorm:"column:feishu_peer;default:''"` // 飞书对话方 ID（open_id 或 chat_id）
-	CreatedAt  time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt  time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	SessionID        string    `gorm:"primaryKey;column:session_id"`
+	UserID           string    `gorm:"column:user_id;index;not null"`
+	KVData           string    `gorm:"column:kv_data;type:text"`              // JSON 格式的 KV 上下文
+	Title            string    `gorm:"column:title;default:''"`               // AI 生成的会话标题（空则前端用首条消息做预览）
+	Source           string    `gorm:"column:source;default:'web'"`           // 来源：web | feishu
+	FeishuPeer       string    `gorm:"column:feishu_peer;default:''"`         // 飞书对话方 ID（open_id 或 chat_id）
+	ParentSessionID  string    `gorm:"column:parent_session_id;default:''"` // 血缘父会话（显式续话或压缩衍生时设置）
+	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt        time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 // TableName 指定表名
@@ -109,11 +110,11 @@ type ToolRequest struct {
 
 func (ToolRequest) TableName() string { return "tool_requests" }
 
-// UserProfile 用户人设表：存储 LLM 撰写的个性化沟通偏好及用户记忆
+// UserProfile 用户人设表：存储 LLM 撰写的个性化沟通偏好及 Agent 笔记
 type UserProfile struct {
 	UserID    string    `gorm:"primaryKey;column:user_id"`
 	Persona   string    `gorm:"column:persona;type:text;default:''"` // LLM 写入的自由文本人设，空=未初始化
-	Memory    string    `gorm:"column:memory;type:text;default:''"` // 用户要求记住的持久信息，空=暂无记忆
+	Notes     string    `gorm:"column:notes;type:text;default:''"`   // §分隔的 Agent 笔记（跨会话持久）
 	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 

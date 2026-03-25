@@ -34,34 +34,52 @@ type tokenCache struct {
 	expiresAt time.Time
 }
 
-var globalTokenCache = &tokenCache{}
+// botCachesMu 保护 botCaches 的并发读写
+var (
+	botCachesMu sync.RWMutex
+	botCaches   = map[string]*tokenCache{}
+)
 
-// SetCredentials 更新 Bot 凭证并清空缓存的 token
+// SetCredentials 更新指定 appID 的 Bot 凭证并清空缓存的 token
 func SetCredentials(appID, appSecret string) {
-	globalTokenCache.mu.Lock()
-	defer globalTokenCache.mu.Unlock()
-	globalTokenCache.appID = appID
-	globalTokenCache.appSecret = appSecret
-	globalTokenCache.token = ""
-	globalTokenCache.expiresAt = time.Time{}
+	botCachesMu.Lock()
+	c, ok := botCaches[appID]
+	if !ok {
+		c = &tokenCache{}
+		botCaches[appID] = c
+	}
+	botCachesMu.Unlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.appID = appID
+	c.appSecret = appSecret
+	c.token = ""
+	c.expiresAt = time.Time{}
 }
 
-// GetToken 返回有效的 tenant_access_token，过期提前 5 分钟刷新
-func GetToken() (string, error) {
-	globalTokenCache.mu.Lock()
-	defer globalTokenCache.mu.Unlock()
-
-	if time.Now().Before(globalTokenCache.expiresAt) {
-		return globalTokenCache.token, nil
+// GetToken 返回指定 appID 的有效 tenant_access_token，过期提前 5 分钟刷新
+func GetToken(appID string) (string, error) {
+	botCachesMu.RLock()
+	c, ok := botCaches[appID]
+	botCachesMu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("feishu credentials not configured for appID %s", appID)
 	}
 
-	if globalTokenCache.appID == "" || globalTokenCache.appSecret == "" {
-		return "", fmt.Errorf("feishu credentials not configured")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if time.Now().Before(c.expiresAt) {
+		return c.token, nil
+	}
+	if c.appID == "" || c.appSecret == "" {
+		return "", fmt.Errorf("feishu credentials not configured for appID %s", appID)
 	}
 
 	body, _ := json.Marshal(map[string]string{
-		"app_id":     globalTokenCache.appID,
-		"app_secret": globalTokenCache.appSecret,
+		"app_id":     c.appID,
+		"app_secret": c.appSecret,
 	})
 	resp, err := http.Post(
 		config.Cfg.FeishuAPIBase+"/open-apis/auth/v3/tenant_access_token/internal",
@@ -87,17 +105,23 @@ func GetToken() (string, error) {
 		return "", fmt.Errorf("feishu api error %d: %s", result.Code, result.Msg)
 	}
 
-	globalTokenCache.token = result.TenantAccessToken
-	globalTokenCache.expiresAt = time.Now().Add(time.Duration(result.Expire-300) * time.Second)
-	return globalTokenCache.token, nil
+	c.token = result.TenantAccessToken
+	c.expiresAt = time.Now().Add(time.Duration(result.Expire-300) * time.Second)
+	return c.token, nil
 }
 
-// InvalidateToken 清空 token 缓存（凭证更新后调用）
-func InvalidateToken() {
-	globalTokenCache.mu.Lock()
-	defer globalTokenCache.mu.Unlock()
-	globalTokenCache.token = ""
-	globalTokenCache.expiresAt = time.Time{}
+// InvalidateToken 清空指定 appID 的 token 缓存（凭证更新后调用）
+func InvalidateToken(appID string) {
+	botCachesMu.RLock()
+	c, ok := botCaches[appID]
+	botCachesMu.RUnlock()
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	c.token = ""
+	c.expiresAt = time.Time{}
+	c.mu.Unlock()
 }
 
 // ── 消息发送 ──────────────────────────────────────────────────────────────────
@@ -105,8 +129,8 @@ func InvalidateToken() {
 // SendTextTo 向指定接收方发送文本消息
 // receiveID: open_id / user_id / chat_id / union_id
 // receiveIDType: "open_id" | "user_id" | "chat_id" | "union_id"
-func SendTextTo(receiveID, receiveIDType, text string) error {
-	token, err := GetToken()
+func SendTextTo(appID, receiveID, receiveIDType, text string) error {
+	token, err := GetToken(appID)
 	if err != nil {
 		return err
 	}
@@ -151,8 +175,8 @@ func buildTextCard(text string) string {
 }
 
 // sendMessageGetID 发送消息并返回 message_id，供内部复用。
-func sendMessageGetID(receiveID, receiveIDType, msgType, content string) (string, error) {
-	token, err := GetToken()
+func sendMessageGetID(appID, receiveID, receiveIDType, msgType, content string) (string, error) {
+	token, err := GetToken(appID)
 	if err != nil {
 		return "", err
 	}
@@ -193,13 +217,13 @@ func sendMessageGetID(receiveID, receiveIDType, msgType, content string) (string
 
 // SendCardGetID 以交互卡片形式发送文本消息，返回 message_id 供后续 UpdateCard 使用。
 // 飞书只允许对卡片消息执行 PATCH 更新，因此需要等待回复的场景都用此函数发送。
-func SendCardGetID(receiveID, receiveIDType, text string) (string, error) {
-	return sendMessageGetID(receiveID, receiveIDType, "interactive", buildTextCard(text))
+func SendCardGetID(appID, receiveID, receiveIDType, text string) (string, error) {
+	return sendMessageGetID(appID, receiveID, receiveIDType, "interactive", buildTextCard(text))
 }
 
 // UpdateCard 将已发送的交互卡片消息更新为新文本内容（PATCH）。
-func UpdateCard(messageID, text string) error {
-	token, err := GetToken()
+func UpdateCard(appID, messageID, text string) error {
+	token, err := GetToken(appID)
 	if err != nil {
 		return err
 	}
@@ -224,8 +248,8 @@ func UpdateCard(messageID, text string) error {
 
 // SendOptionsCard 向指定对话发送带按钮的选项卡片
 // chatID 可以是 chat_id 或 open_id，receiveIDType 对应类型
-func SendOptionsCard(chatID, receiveIDType, title string, options []map[string]string) error {
-	token, err := GetToken()
+func SendOptionsCard(appID, chatID, receiveIDType, title string, options []map[string]string) error {
+	token, err := GetToken(appID)
 	if err != nil {
 		return err
 	}
@@ -275,7 +299,7 @@ func SendOptionsCard(chatID, receiveIDType, title string, options []map[string]s
 	return parseAPIError(resp.Body)
 }
 
-// PostWebhook 向 Webhook URL 发送文本消息
+// PostWebhook 向 Webhook URL 发送文本消息（不需要 Bot token）
 func PostWebhook(webhookURL, text string) error {
 	body, _ := json.Marshal(map[string]any{
 		"msg_type": "text",
@@ -323,8 +347,8 @@ func feishuFileType(ext string) string {
 }
 
 // UploadImage 将本地图片上传到飞书，返回 image_key
-func UploadImage(filePath string) (string, error) {
-	token, err := GetToken()
+func UploadImage(appID, filePath string) (string, error) {
+	token, err := GetToken(appID)
 	if err != nil {
 		return "", err
 	}
@@ -387,8 +411,8 @@ func UploadImage(filePath string) (string, error) {
 }
 
 // UploadFile 将本地文件上传到飞书，返回 file_key
-func UploadFile(filePath, fileName string) (string, error) {
-	token, err := GetToken()
+func UploadFile(appID, filePath, fileName string) (string, error) {
+	token, err := GetToken(appID)
 	if err != nil {
 		return "", err
 	}
@@ -444,8 +468,8 @@ func UploadFile(filePath, fileName string) (string, error) {
 }
 
 // SendImageTo 向指定接收方发送图片消息
-func SendImageTo(receiveID, receiveIDType, imageKey string) error {
-	token, err := GetToken()
+func SendImageTo(appID, receiveID, receiveIDType, imageKey string) error {
+	token, err := GetToken(appID)
 	if err != nil {
 		return err
 	}
@@ -468,8 +492,8 @@ func SendImageTo(receiveID, receiveIDType, imageKey string) error {
 }
 
 // SendFileTo 向指定接收方发送文件消息
-func SendFileTo(receiveID, receiveIDType, fileKey string) error {
-	token, err := GetToken()
+func SendFileTo(appID, receiveID, receiveIDType, fileKey string) error {
+	token, err := GetToken(appID)
 	if err != nil {
 		return err
 	}
@@ -494,8 +518,8 @@ func SendFileTo(receiveID, receiveIDType, fileKey string) error {
 // ── 文件下载 ───────────────────────────────────────────────────────────────────
 
 // DownloadResource 下载飞书消息中的图片/文件到本地，返回相对于 uploadDir 的路径
-func DownloadResource(messageID, fileKey, resourceType, uploadDir string) (string, error) {
-	token, err := GetToken()
+func DownloadResource(appID, messageID, fileKey, resourceType, uploadDir string) (string, error) {
+	token, err := GetToken(appID)
 	if err != nil {
 		return "", err
 	}

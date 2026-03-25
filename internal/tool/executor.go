@@ -182,11 +182,22 @@ func New() *Executor {
 	e.register("code_search", handleCodeSearch)
 	e.register("cron", handleCron)
 	e.register("user_persona", handleUserPersona)        // 合并自 get_user_persona / set_user_persona
-	e.register("update_user_memory", handleUpdateUserMemory)
 	e.register("nano_banana", handleNanoBanana)
 	e.register("get_tool_doc", handleGetToolDoc)
 	e.register("read_image", handleReadImage)
 	e.register("mcp", handleMCP)
+	if config.Cfg.MemoryEnabled {
+		e.register("memory", handleMemory)
+	}
+	if config.Cfg.SessionSearchEnabled {
+		e.register("session_search", handleSessionSearch)
+	}
+	if config.Cfg.HonchoEnabled {
+		e.register("honcho_profile", handleHonchoProfile)
+		e.register("honcho_search", handleHonchoSearch)
+		e.register("honcho_context", handleHonchoContext)
+		e.register("honcho_conclude", handleHonchoConclude)
+	}
 	return e
 }
 
@@ -569,23 +580,6 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "update_user_memory",
-				Description: "Save user memory. Merge existing # User Memory with new info, pass full merged text. Auto-compressed when over limit.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"content": map[string]any{
-							"type":        "string",
-							"description": "Full merged memory text",
-						},
-					},
-					"required": []string{"content"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
 				Name:        "nano_banana",
 				Description: "Generate images using the nano-banana-pro model (txt2img/img2img/edit). Call get_tool_doc(\"nano_banana\") first for full parameter docs.",
 				Parameters: map[string]any{
@@ -658,6 +652,36 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				},
 			},
 		},
+	}
+	// 按开关追加长期记忆工具
+	if config.Cfg.MemoryEnabled {
+		all = append(all, MemoryTool())
+	}
+	if config.Cfg.SessionSearchEnabled {
+		all = append(all, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name: "session_search",
+				Description: "Search past sessions (with query: FTS + AI summary, limit 1-5) or list recent sessions (no query: metadata only, limit 1-10). Use for context from earlier conversations only.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "Keywords to search. Omit to list recent sessions.",
+						},
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "Max results (with query: default 3 max 5; no query: default 5 max 10)",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		})
+	}
+	if config.Cfg.HonchoEnabled {
+		all = append(all, HonchoTools()...)
 	}
 	// initialized=true 后，过滤掉仅在 bootstrap 阶段使用的工具
 	if cfg, err := storage.GetAppConfig(); err == nil && cfg.Initialized {
@@ -835,6 +859,15 @@ func handleGetSkillContent(ctx context.Context, argsJSON string) (string, error)
 		}
 		if sender := speakerSenderFromCtx(ctx); sender != nil {
 			_ = sender(name)
+		}
+	}
+	// Approximate LFU usage tracking: record when a self-improving skill is loaded.
+	if skillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
+		siMarker := filepath.Join("self-improving", "skills")
+		if strings.Contains(skillDir, siMarker) {
+			userSkillsDir := skill.Store.GetUserSkillsDir(userID)
+			decayHours := config.Cfg.SelfImprovingLFUDecayHours
+			go skill.RecordSelfImprovingUse(userSkillsDir, args.SkillID, decayHours)
 		}
 	}
 	return content, nil
@@ -1268,6 +1301,9 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 			return "", fmt.Errorf("内容中的 skill_id=%q 与参数 skill_id=%q 不一致，请保持一致", parsed.SkillID, args.SkillID)
 		}
 
+		if err := skill.ScanSkillFile(args.Content, ""); err != nil {
+			return "", fmt.Errorf("skill security scan rejected SKILL.md: %w", err)
+		}
 		mdPath := filepath.Join(absSkillDir, "SKILL.md")
 		if _, statErr := os.Stat(mdPath); statErr == nil {
 			return "", fmt.Errorf("skill %q already exists; overwriting is not allowed", args.SkillID)
@@ -1311,6 +1347,9 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 		return "", fmt.Errorf("sub_path escapes skill directory")
 	}
 
+	if err := skill.ScanSkillFile(args.Content, args.SubPath); err != nil {
+		return "", fmt.Errorf("skill security scan rejected %s: %w", args.SubPath, err)
+	}
 	if err := os.MkdirAll(filepath.Dir(absTargetPath), 0o755); err != nil {
 		return "", fmt.Errorf("create directory: %w", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"OTTClaw/config"
+	"OTTClaw/internal/honcho"
 	"OTTClaw/internal/llm"
 	"OTTClaw/internal/logger"
 	"OTTClaw/internal/mcp"
@@ -51,6 +52,13 @@ type StreamWriter interface {
 	WriteError(msg string) error
 }
 
+// memSnap 会话内冻结的记忆快照：会话首轮从 DB 读取一次，后续轮次直接复用，
+// 与 Hermes 的"冻结快照"设计一致，避免同一会话内 LLM 看到自己刚写入的记忆。
+type memSnap struct {
+	notes   string
+	persona string
+}
+
 // Agent 持有所有依赖，处理单次对话的完整 LLM 循环
 type Agent struct {
 	mu             sync.RWMutex // 保护 roleMD（可由 update_role_md 工具在运行时热更新）
@@ -58,6 +66,32 @@ type Agent struct {
 	toolExec       *tool.Executor
 	roleMD         string // ROLE.md 全文，可热更新
 	toolPrinciples string // TOOL.md 中的"调用原则"部分，每次对话注入
+
+	reviewMu         sync.Mutex
+	turnsSinceReview map[string]int // key: userID，每次 Run 完成后递增，达到 MemoryNudgeInterval 后触发后台 review
+
+	// Fix 2: 会话记忆冻结快照缓存（key: sessionID）
+	memSnapMu    sync.RWMutex
+	memSnaps     map[string]memSnap
+
+	// Honcho Layer 2
+	honchoClient   *honcho.Client
+	honchoCtxMu    sync.RWMutex
+	honchoCtxCache map[string]string // key: userID → latest prefetched Honcho context string
+	honchoWg       sync.WaitGroup   // 追踪 in-flight syncToHoncho goroutine，优雅退出时等待完成
+
+	// 后台 goroutine 生命周期管理
+	// bgCtx 在 Shutdown() 时被 cancel，使所有后台 goroutine 能感知关闭信号并及时退出。
+	// bgWg  追踪 flushSessionMemory / maybeReviewMemory / maybeCreateSelfImprovingSkill，
+	// Shutdown() 等待它们全部完成后再退出，防止进程被 SIGKILL 时丢失写操作。
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWg     sync.WaitGroup
+
+	// shutdownCh 在 Shutdown() 第一步关闭，SSE handler 监听此信号后立即取消 agentCtx，
+	// 使 srv.Shutdown() 能在数秒内完成而非等满 30s 超时。
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 func (a *Agent) getRoleMD() string {
@@ -116,11 +150,26 @@ func Init() error {
 			break
 		}
 	}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	singleton = &Agent{
-		llmClient:      llm.NewClient(),
-		toolExec:       tool.New(),
-		roleMD:         string(roleMD),
-		toolPrinciples: principles,
+		llmClient:        llm.NewClient(),
+		toolExec:         tool.New(),
+		roleMD:           string(roleMD),
+		toolPrinciples:   principles,
+		turnsSinceReview: make(map[string]int),
+		memSnaps:         make(map[string]memSnap),
+		honchoCtxCache:   make(map[string]string),
+		bgCtx:            bgCtx,
+		bgCancel:         bgCancel,
+		shutdownCh:       make(chan struct{}),
+	}
+	if config.Cfg.HonchoEnabled {
+		singleton.honchoClient = honcho.NewClient(
+			config.Cfg.HonchoBaseURL,
+			config.Cfg.HonchoAPIKey,
+			config.Cfg.HonchoAppName,
+			config.Cfg.HonchoAppID,
+		)
 	}
 	return nil
 }
@@ -186,6 +235,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	// LLM 循环：最多执行 N 轮，防止无限循环（AGENT_MAX_ITERATIONS，默认 20）
 	maxIterations := config.Cfg.AgentMaxIterations
 	hasCompressed := false // 每次 Run() 只允许压缩一次，防止「压缩 → 工具执行 → 再次超限 → 再压缩」循环
+	hasFlushed := false    // Fix 1: 防止压缩前 flush 与会话结束 flush 重复触发
 	toolCallIters := 0     // 有工具调用的迭代轮次数，用于判断是否触发自我进化技能生成
 	for iter := 0; iter < maxIterations; iter++ {
 		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
@@ -194,6 +244,15 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				logger.Debug("agent", userID, sessionID,
 					fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d",
 						estToks, config.Cfg.MaxContextTokens), 0)
+				// Fix 1: 压缩前同步 flush memory，防止旧消息被压缩后信息永久丢失。
+				// 与 Hermes 行为一致：压缩即将抹掉历史，需先让 LLM 保存有价值的内容。
+				if config.Cfg.MemoryEnabled && !hasFlushed {
+					flushCtx, flushCancel := context.WithTimeout(context.Background(), 60*time.Second)
+					a.flushSessionMemory(flushCtx, userID, sessionID, messages)
+					flushCancel()
+					hasFlushed = true
+					logger.Debug("agent", userID, sessionID, "[memory-flush] pre-compress flush done", 0)
+				}
 				// 预检：历史消息 > keepRecent 才会真正压缩，才值得推送 compress_start。
 				// 避免新会话中大文件读取导致阈值超限但实际无历史可压的"假压缩"事件。
 				if len(messages)-1 > config.Cfg.CompressKeepRecent {
@@ -363,8 +422,41 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			// 异步：在第 3 轮对话完成后生成会话 AI 标题
 			go a.maybeGenerateTitle(sessionID)
 			if config.Cfg.SelfImprovingMinToolIters > 0 && toolCallIters >= config.Cfg.SelfImprovingMinToolIters {
-				go a.maybeCreateSelfImprovingSkill(userID, sessionID, messages)
+				a.bgWg.Add(1)
+				go func() {
+					defer a.bgWg.Done()
+					a.maybeCreateSelfImprovingSkill(userID, sessionID, messages)
+				}()
 			}
+			// 会话结束 memory flush：达到最少轮次后在后台提示 LLM 保存有价值的信息。
+			// hasFlushed 为 true 表示压缩前已做过同步 flush，此处跳过，避免重复触发。
+			if config.Cfg.MemoryEnabled && !hasFlushed && config.Cfg.MemoryFlushMinTurns > 0 {
+				if userMsgCount, err := storage.CountUserMessages(sessionID); err == nil &&
+					int(userMsgCount) >= config.Cfg.MemoryFlushMinTurns {
+					hasFlushed = true
+					a.bgWg.Add(1)
+					go func() {
+						defer a.bgWg.Done()
+						a.flushSessionMemory(a.bgCtx, userID, sessionID, messages)
+					}()
+				}
+			}
+			// 定时后台 review（每隔 N 轮检查一次）
+			if config.Cfg.MemoryEnabled {
+				a.bgWg.Add(1)
+				go func() {
+					defer a.bgWg.Done()
+					a.maybeReviewMemory(userID, messages)
+				}()
+			}
+			// Honcho Layer 2: 异步同步本轮消息并预取下轮上下文
+			// Fix 3: Add(1) 在 go 之前，确保 Shutdown() 中 Wait() 不会漏掉这次 goroutine
+			if a.honchoClient != nil {
+				a.honchoWg.Add(1)
+				go a.syncToHoncho(userID, sessionID, userInput, assistantText)
+			}
+			// Fix 2: 会话结束，清理记忆快照缓存（防止 map 无限增长）
+			a.evictMemSnap(sessionID)
 			logger.Debug("agent", userID, sessionID,
 				fmt.Sprintf("agent loop end: normal answer, total_iter=%d cost=%dms",
 					iter+1, time.Since(start).Milliseconds()), 0)
@@ -471,6 +563,10 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 // setupContext 将所有工具所需的上下文信息注入 ctx，返回新的 ctx。
 // 每次 Run() 调用时执行一次，避免 Run 函数头部堆砌大量闭包。
 func (a *Agent) setupContext(ctx context.Context, userID, sessionID string, writer StreamWriter, start time.Time) context.Context {
+	ctx = tool.WithLLMClient(ctx, a.llmClient)
+	if a.honchoClient != nil {
+		ctx = tool.WithHonchoClient(ctx, a.honchoClient)
+	}
 	ctx = tool.WithProgressSender(ctx, func(message string) error {
 		return writer.WriteProgress(config.Cfg.ProgressLabel, message, time.Since(start).Milliseconds())
 	})
@@ -490,19 +586,6 @@ func (a *Agent) setupContext(ctx context.Context, userID, sessionID string, writ
 		a.setRoleMD(newContent)
 		_ = writer.WriteSpeaker(extractRoleName(newContent))
 		return nil
-	})
-	ctx = tool.WithMemoryCompressor(ctx, func(innerCtx context.Context, text string, maxChars int) (string, error) {
-		prompt := fmt.Sprintf(
-			"请将以下用户记忆信息压缩到 %d 字符以内，保留最重要的信息，删除冗余和重复内容，输出纯文本（不要加任何解释）：\n\n%s",
-			maxChars, text,
-		)
-		compressed, err := a.llmClient.ChatSync(innerCtx, []llm.ChatMessage{
-			{Role: "user", Content: prompt},
-		})
-		if err != nil {
-			return "", err
-		}
-		return compressed, nil
 	})
 	return ctx
 }
@@ -543,8 +626,32 @@ func (a *Agent) initRun(userID, sessionID, userInput string) (*runState, error) 
 	}
 
 	// 4. 构造系统 prompt 与 messages
-	systemPrompt, promptBD := a.buildSystemPrompt(userID, kv, userInput)
+	// isFirstTurn: only the just-persisted user message is in DB (len==1)
+	// → Honcho context baked into system prompt for prefix-cache stability.
+	// Subsequent turns → Honcho context appended to user message at call time (ephemeral).
+	isFirstTurn := len(dbMsgs) == 1
+	// Fix 2: 取冻结快照（首轮读 DB 并缓存，后续轮次直接复用，LLM 在本会话内不会看到自己刚写入的记忆）
+	snap := a.getOrLoadMemSnap(userID, sessionID)
+	systemPrompt, promptBD := a.buildSystemPrompt(userID, kv, userInput, isFirstTurn, snap)
 	messages := buildMessages(systemPrompt, dbMsgs)
+
+	// Inject Honcho context into the current user message for turns 2+ (ephemeral, not persisted).
+	if !isFirstTurn && a.honchoClient != nil {
+		a.honchoCtxMu.RLock()
+		hCtx := a.honchoCtxCache[userID]
+		a.honchoCtxMu.RUnlock()
+		if hCtx != "" {
+			for i := len(messages) - 1; i >= 1; i-- {
+				if messages[i].Role == "user" {
+					messages[i].Content += "\n\n" + honchoTurnContextBlock(hCtx)
+					logger.Debug("agent", userID, sessionID, fmt.Sprintf("[honcho] turn=%d: context injected into user msg (len=%d)", len(dbMsgs), len(hCtx)), 0)
+					break
+				}
+			}
+		} else {
+			logger.Debug("agent", userID, sessionID, fmt.Sprintf("[honcho] turn=%d: cache empty, no context injected", len(dbMsgs)), 0)
+		}
+	}
 	tools := a.toolExec.ToolDefinitions()
 
 	// 预计算 tools / history / user message 字符数，供后续 usage 日志分析
@@ -696,6 +803,7 @@ type promptBreakdown struct {
 	role  int // getRoleMD() 字符数
 	skill int // skill heads 字符数
 	kv    int // session KV JSON 字符数
+	notes int // agent notes 字符数
 	total int // 完整 system prompt 字符数
 }
 
@@ -704,12 +812,15 @@ func (b promptBreakdown) estTok() (role, skill, kv, other int) {
 	role = b.role / 4
 	skill = b.skill / 4
 	kv = b.kv / 4
-	other = (b.total - b.role - b.skill - b.kv) / 4
+	other = (b.total - b.role - b.skill - b.kv - b.notes) / 4
 	return
 }
 
-// buildSystemPrompt 拼装系统 prompt：ROLE + TOOL + 技能头部列表 + 当前用户 + 人设 + 会话 KV + MCP
-func (a *Agent) buildSystemPrompt(userID string, kv map[string]interface{}, userInput string) (string, promptBreakdown) {
+// buildSystemPrompt 拼装系统 prompt：ROLE + TOOL + 技能头部列表 + 当前用户 + 笔记 + 人设 + 会话 KV + MCP + Memory Guidance
+// isFirstTurn: Honcho context is baked into the system prompt only on the first turn of a session
+// (prefix-cache friendly). Subsequent turns inject Honcho context into the user message instead.
+// snap: 会话开始时冻结的 notes/persona 快照，保证同一会话内各轮 system prompt 对记忆部分完全一致。
+func (a *Agent) buildSystemPrompt(userID string, kv map[string]interface{}, userInput string, isFirstTurn bool, snap memSnap) (string, promptBreakdown) {
 	roleMD := a.getRoleMD()
 	heads := skill.Store.GetHead(userID)
 	headsText := skill.FormatHeadsForPrompt(heads)
@@ -730,6 +841,53 @@ func (a *Agent) buildSystemPrompt(userID string, kv map[string]interface{}, user
 		if section := mcp.Global.BuildPromptSection(matched); section != "" {
 			mcpSection = "\n\n# MCP Servers (matched for this request)\n" + section
 		}
+	}
+
+	// Honcho: bake prefetched context into system prompt on first turn only.
+	// (Subsequent turns inject into user message — see initRun.)
+	honchoSection := ""
+	if isFirstTurn && a.honchoClient != nil {
+		a.honchoCtxMu.RLock()
+		hCtx := a.honchoCtxCache[userID]
+		a.honchoCtxMu.RUnlock()
+		if hCtx != "" {
+			honchoSection = "\n\n# Honcho Memory (cross-session context)\n" + hCtx
+			logger.Debug("agent", userID, "", fmt.Sprintf("[honcho] first-turn: context baked into system prompt (len=%d)", len(hCtx)), 0)
+		} else {
+			logger.Debug("agent", userID, "", "[honcho] first-turn: cache empty, no context in system prompt", 0)
+		}
+	}
+
+	notesText := ""
+	memorySection := ""
+	if config.Cfg.MemoryEnabled {
+		notesText = snap.notes
+		logger.Debug("agent", userID, "", fmt.Sprintf("[memory] system prompt: notes=%d chars, persona=%d chars",
+			len([]rune(snap.notes)), len([]rune(snap.persona))), 0)
+		var guidance strings.Builder
+		guidance.WriteString("\n\n# Agent Notes (persistent across sessions)\n")
+		guidance.WriteString(notesText)
+		guidance.WriteString("\n\n# User Persona\n")
+		guidance.WriteString(snap.persona)
+		guidance.WriteString("\n\n# Memory Guidance\n")
+		if config.Cfg.HonchoEnabled {
+			guidance.WriteString("memory(target=notes): env/tool facts. memory(target=persona): user facts for next session. honcho_conclude: save conclusions. session_search: past session recall.\nhoncho_profile: only if Honcho Memory absent. honcho_search: user references past sessions. honcho_context: deep user reasoning, use sparingly.")
+		} else {
+			guidance.WriteString("memory(target=notes): env/tool facts, conventions. memory(target=persona): user preferences.")
+			if config.Cfg.SessionSearchEnabled {
+				guidance.WriteString(" session_search: past session recall.")
+			}
+		}
+		memorySection = guidance.String()
+	} else if config.Cfg.SessionSearchEnabled || config.Cfg.HonchoEnabled {
+		var parts []string
+		if config.Cfg.SessionSearchEnabled {
+			parts = append(parts, "session_search: recall past sessions.")
+		}
+		if config.Cfg.HonchoEnabled {
+			parts = append(parts, "honcho_conclude: save conclusions. honcho_profile: only if Honcho Memory absent. honcho_search: user references past sessions. honcho_context: deep user reasoning, use sparingly.")
+		}
+		memorySection = "\n\n# Memory Guidance\n" + strings.Join(parts, " ")
 	}
 
 	prompt := fmt.Sprintf(`# Security Policy
@@ -761,59 +919,117 @@ user_id: %s
 # Current Time
 %s
 
-# User Persona
-%s
-
-# User Memory
-%s
-
 # Current Session Context (KV)
-%s%s`,
+%s%s%s%s`,
 		roleMD,
 		a.toolPrinciples,
 		headsText,
 		userID,
 		timeSection,
-		buildPersonaSection(userID),
-		buildMemorySection(userID),
 		string(kvJSON),
 		mcpSection,
+		memorySection,
+		honchoSection,
 	)
 
+	notesLen := len(notesText)
 	bd := promptBreakdown{
 		role:  len(roleMD),
 		skill: len(headsText),
 		kv:    len(kvJSON),
+		notes: notesLen,
 		total: len(prompt),
 	}
 	return prompt, bd
 }
 
+// getOrLoadMemSnap 返回该 session 的冻结记忆快照。
+// 首次调用时从 DB 读取并缓存；同一 session 的后续调用直接返回缓存，
+// 确保会话内 LLM 看到的 notes/persona 保持一致（与本轮写入完全隔离）。
+func (a *Agent) getOrLoadMemSnap(userID, sessionID string) memSnap {
+	a.memSnapMu.RLock()
+	if snap, ok := a.memSnaps[sessionID]; ok {
+		a.memSnapMu.RUnlock()
+		return snap
+	}
+	a.memSnapMu.RUnlock()
+
+	snap := memSnap{
+		notes:   buildNotesSection(userID),
+		persona: buildPersonaSection(userID),
+	}
+	a.memSnapMu.Lock()
+	a.memSnaps[sessionID] = snap
+	a.memSnapMu.Unlock()
+	return snap
+}
+
+// evictMemSnap 清除指定 session 的记忆快照缓存（会话结束后调用，防止 map 无限增长）。
+func (a *Agent) evictMemSnap(sessionID string) {
+	a.memSnapMu.Lock()
+	delete(a.memSnaps, sessionID)
+	a.memSnapMu.Unlock()
+}
+
+// Shutdown 等待所有 in-flight Honcho goroutine 完成，超时后强制返回。
+// 在进程收到 SIGTERM/SIGINT 时调用，防止异步 Honcho 消息丢失。
+// ShutdownCh 返回一个在 Shutdown() 第一步被关闭的 channel。
+// SSE handler 通过监听此 channel 来感知服务器关闭信号，主动取消 agentCtx，
+// 使 srv.Shutdown() 能迅速回收连接，而无需等待 30s 超时。
+func (a *Agent) ShutdownCh() <-chan struct{} { return a.shutdownCh }
+
+func (a *Agent) Shutdown(timeout time.Duration) {
+	// 第一步：通知所有 SSE handler 立即取消 agentCtx，让 HTTP 连接快速关闭
+	a.shutdownOnce.Do(func() { close(a.shutdownCh) })
+	// 第二步：取消所有后台 goroutine 的 context，使进行中的 LLM / Honcho HTTP 调用立即中止
+	a.bgCancel()
+
+	// 并行等待 bgWg（LLM 后台任务）和 honchoWg（Honcho 同步），两者均受 bgCtx 控制，
+	// 会在 bgCancel() 后快速退出，无需串行等待。
+	bgDone := make(chan struct{})
+	go func() { a.bgWg.Wait(); close(bgDone) }()
+
+	honchoWgDone := make(chan struct{})
+	go func() { a.honchoWg.Wait(); close(honchoWgDone) }()
+
+	deadline := time.After(timeout)
+	for bgDone != nil || honchoWgDone != nil {
+		select {
+		case <-bgDone:
+			logger.Info("agent", "", "", "[shutdown] bg goroutines finished", 0)
+			bgDone = nil
+		case <-honchoWgDone:
+			logger.Info("agent", "", "", "[shutdown] honcho sync finished", 0)
+			honchoWgDone = nil
+		case <-deadline:
+			logger.Warn("agent", "", "", "[shutdown] timeout waiting for background goroutines, forcing exit", 0)
+			return
+		}
+	}
+	logger.Info("agent", "", "", "[shutdown] all background goroutines finished cleanly", 0)
+}
+
+// buildNotesSection 读取用户笔记并格式化为系统提示片段
+func buildNotesSection(userID string) string {
+	notes, err := storage.GetUserNotes(userID)
+	if err != nil || notes == "" {
+		return "(empty)"
+	}
+	chars := len([]rune(notes))
+	return fmt.Sprintf("[%d/%d chars]\n%s", chars, config.Cfg.MemoryNotesCharLimit, notes)
+}
+
 // buildPersonaSection 根据用户人设状态生成系统提示词片段。
-// 未初始化时返回引导文本，已设置时直接返回 persona 内容。
+// 新用户（persona 为空）：注入轻量推断提示，让 agent 从首条消息自动推断偏好，不主动问用户。
+// 老用户：直接返回已保存的 persona 内容。
 func buildPersonaSection(userID string) string {
 	profile, err := storage.GetUserProfile(userID)
 	if err != nil || profile == nil || profile.Persona == "" {
-		return "[新用户] 该用户尚未完成个性化设置。\n" +
-			"请在本次对话开始时，主动友好地引导他完成偏好设置：\n" +
-			"1. 希望 AI 怎么称呼他\n" +
-			"2. 偏好的语言（中文/英文等）\n" +
-			"3. 喜欢的对话风格（正式/轻松、详细/简洁等）\n" +
-			"4. 其他个性化偏好\n" +
-			"完成后调用 set_user_persona 将设置保存为简洁的自然语言文本。"
+		return "[New user — no history yet] Infer their communication preference " +
+			"(language, tone, level of detail) from their first message and adapt accordingly. " +
+			"Do NOT ask setup questions. Use memory(target=persona) to save any preferences you observe."
 	}
 	return profile.Persona
-}
-
-// buildMemorySection 根据用户记忆状态生成系统提示词片段。
-func buildMemorySection(userID string) string {
-	profile, err := storage.GetUserProfile(userID)
-	if err != nil || profile == nil || profile.Memory == "" {
-		return "（暂无记忆。当用户说「记住 XXX」「以后 XXX」等表达持久偏好时，调用 update_user_memory 保存。）"
-	}
-	return "以下是用户要求你记住的信息，请在每次对话中参考：\n" +
-		profile.Memory + "\n\n" +
-		"当用户说「记住 XXX」「以后 XXX」等表达持久偏好时，将新信息与上面已有内容合并后调用 update_user_memory 保存。"
 }
 
 // truncate 将字符串截断到最多 n 个 rune，超出时末尾追加 "..."（占 3 个 rune）。
@@ -1505,7 +1721,9 @@ If worth saving, call the skill tool:
 4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",        content=<data>)
 5. skill(action=reload)  — must call after all files are written
 
-SKILL.md format (ALL fields in English except display_name; be concise — every word counts):
+The content field for SKILL.md must be this exact structure (the ====== separator lines are LITERAL — they must appear in the content string itself, not as visual decoration):
+
+` + "```" + `
 ==============================
 skill_id: <snake_case_id>
 name: <SkillName>
@@ -1515,6 +1733,15 @@ trigger: <when to use, ≤30 words>
 enable: true
 ==============================
 <workflow: bullet points only, no prose, no redundant headings>
+` + "```" + `
+
+Rules:
+- ALL fields in English except display_name
+- The content must start with a line of 30 '=' signs
+- There must be exactly two separator lines of 30 '=' signs
+- Everything between the two separators is the HEAD (key: value fields)
+- Everything after the second separator is the CONTENT (workflow)
+- Be concise — every word counts
 
 If nothing is worth saving, reply: SKIP`
 
@@ -1572,9 +1799,13 @@ func (a *Agent) maybeCreateSelfImprovingSkill(userID, sessionID string, messages
 
 	const maxIter = 8
 	for i := 0; i < maxIter; i++ {
+		if a.bgCtx.Err() != nil {
+			logger.Debug("agent", userID, sessionID, "[self-improving] shutdown signal, abort", 0)
+			return
+		}
 		logger.Debug("agent", userID, sessionID,
 			fmt.Sprintf("[self-improving] iter=%d: calling LLM, history=%d msgs", i, len(reviewMessages)), 0)
-		eventCh, err := a.llmClient.ChatStream(context.Background(), reviewMessages, miniTools)
+		eventCh, err := a.llmClient.ChatStream(a.bgCtx, reviewMessages, miniTools)
 		if err != nil {
 			logger.Warn("agent", userID, sessionID,
 				fmt.Sprintf("[self-improving] iter=%d: LLM error: %v", i, err), 0)
@@ -1681,7 +1912,10 @@ func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
 		var targetPath string
 		if args.SubPath == "" || strings.EqualFold(args.SubPath, "SKILL.md") {
 			if _, err := skill.ParseContent(args.Content); err != nil {
-				return fmt.Sprintf(`{"error":"SKILL.md format error: %v"}`, err)
+				return fmt.Sprintf(`{"error":"SKILL.md format error: %v — content must follow this exact structure: line1=30 '=' signs, then HEAD key:value fields, then another line of 30 '=' signs, then workflow content. Example: \"==============================\nskill_id: my_skill\nname: MySkill\ndisplay_name: 我的技能\ndescription: What it does.\ntrigger: When to use it.\nenable: true\n==============================\n- Step 1: do X\n- Step 2: do Y\""}`, err)
+			}
+			if err := skill.ScanSkillFile(args.Content, ""); err != nil {
+				return fmt.Sprintf(`{"error":"security scan rejected SKILL.md: %v"}`, err)
 			}
 			targetPath = filepath.Join(skillDir, "SKILL.md")
 		} else {
@@ -1694,6 +1928,9 @@ func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
 			if !strings.HasPrefix(targetPath, skillDir+string(filepath.Separator)) {
 				return `{"error":"sub_path escapes skill directory"}`
 			}
+			if err := skill.ScanSkillFile(args.Content, args.SubPath); err != nil {
+				return fmt.Sprintf(`{"error":"security scan rejected %s: %v"}`, args.SubPath, err)
+			}
 		}
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 			return fmt.Sprintf(`{"error":"mkdir: %v"}`, err)
@@ -1701,10 +1938,33 @@ func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
 		if err := os.WriteFile(targetPath, []byte(args.Content), 0o644); err != nil {
 			return fmt.Sprintf(`{"error":"write file: %v"}`, err)
 		}
+		// Seed approximate LFU usage entry when a new SKILL.md is written.
+		if args.SubPath == "" || strings.EqualFold(args.SubPath, "SKILL.md") {
+			userSkillsDir := filepath.Dir(filepath.Dir(siBaseDir))
+			skill.InitSelfImprovingUsage(userSkillsDir, args.SkillID)
+		}
 		return fmt.Sprintf(`{"ok":true,"path":"%s"}`, targetPath)
 	case "reload":
 		if err := skill.Store.Reload(); err != nil {
 			return fmt.Sprintf(`{"error":"reload: %v"}`, err)
+		}
+		// Evict excess skills (approximate LFU) if the user is over their limit.
+		if config.Cfg.SelfImprovingMaxSkills > 0 {
+			userSkillsDir := filepath.Dir(filepath.Dir(siBaseDir))
+			evicted, evictErr := skill.EvictSelfImprovingSkills(userSkillsDir,
+				config.Cfg.SelfImprovingMaxSkills,
+				config.Cfg.SelfImprovingLFUDecayHours,
+				config.Cfg.SelfImprovingProtectMinutes,
+			)
+			if evictErr != nil {
+				logger.Warn("agent", "", "", "[self-improving] evict error: "+evictErr.Error(), 0)
+			} else if len(evicted) > 0 {
+				logger.Info("agent", "", "", fmt.Sprintf("[self-improving] evicted %d skill(s): %v", len(evicted), evicted), 0)
+				// Reload again so evicted skills are removed from the in-memory store.
+				_ = skill.Store.Reload()
+				evictedJSON, _ := json.Marshal(evicted)
+				return fmt.Sprintf(`{"ok":true,"message":"skills reloaded","evicted":%s}`, evictedJSON)
+			}
 		}
 		return `{"ok":true,"message":"skills reloaded"}`
 	default:
@@ -1786,4 +2046,196 @@ func stripToolCallContentSelective(calls []llm.ToolCall, results []string) []llm
 		}
 	}
 	return stripped
+}
+
+// ----- 长期记忆辅助 -----
+
+const memoryFlushPrompt = "[System: Session ending. Use the available tools to save anything worth keeping — user preferences, corrections, env facts, notable conclusions. If nothing worth saving, skip.]"
+
+const memoryReviewPrompt = "[System: Review the conversation. If you found user preferences, env facts, or stable conventions worth keeping, call the memory tool to save them. If nothing, reply SKIP.]"
+
+// flushSessionMemory 提示 LLM 保存本次会话中有价值的信息。
+// - 压缩前调用：同步执行（调用方传入带 timeout 的 ctx），阻塞直至完成或超时。
+// - 会话正常结束时调用：异步 goroutine + context.Background()。
+// 开放 memory 工具；若 Honcho 已配置，同时开放 honcho_conclude。
+// 不写 DB 对话历史，不影响正常会话上下文。
+func (a *Agent) flushSessionMemory(ctx context.Context, userID, sessionID string, messages []llm.ChatMessage) {
+	flushMessages := append(append([]llm.ChatMessage(nil), messages...),
+		llm.ChatMessage{Role: "user", Content: memoryFlushPrompt})
+
+	flushTools := []llm.Tool{tool.MemoryTool()}
+	if a.honchoClient != nil {
+		// 只追加 honcho_conclude（index 3），不暴露查询类工具
+		flushTools = append(flushTools, tool.HonchoTools()[3])
+	}
+	logger.Debug("agent", userID, sessionID, fmt.Sprintf("[memory-flush] start: msgs=%d tools=%d", len(messages), len(flushTools)), 0)
+
+	eventCh, err := a.llmClient.ChatStream(ctx, flushMessages, flushTools)
+	if err != nil {
+		logger.Warn("agent", userID, sessionID, "[memory-flush] llm call error: "+err.Error(), 0)
+		return
+	}
+
+	var toolCalls []llm.ToolCall
+	for ev := range eventCh {
+		if ev.Error != nil || ev.Done {
+			break
+		}
+		if len(ev.ToolCalls) > 0 {
+			toolCalls = ev.ToolCalls
+		}
+	}
+
+	if len(toolCalls) == 0 {
+		logger.Debug("agent", userID, sessionID, "[memory-flush] LLM found nothing to save", 0)
+		return
+	}
+	logger.Debug("agent", userID, sessionID, fmt.Sprintf("[memory-flush] LLM called %d tool(s)", len(toolCalls)), 0)
+
+	toolCtx := tool.WithUserID(context.Background(), userID)
+	toolCtx = tool.WithSessionID(toolCtx, sessionID)
+	if a.honchoClient != nil {
+		toolCtx = tool.WithHonchoClient(toolCtx, a.honchoClient)
+	}
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "memory", "honcho_conclude":
+			result, err := a.toolExec.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				logger.Warn("agent", userID, sessionID, "[memory-flush] tool "+tc.Function.Name+" error: "+err.Error(), 0)
+			} else {
+				logger.Debug("agent", userID, sessionID, "[memory-flush] "+tc.Function.Name+": "+truncate(result, 80), 0)
+			}
+		}
+	}
+	logger.Debug("agent", userID, sessionID, "[memory-flush] done", 0)
+}
+
+// maybeReviewMemory 每隔 MemoryNudgeInterval 轮在后台回顾会话，主动提炼并写入笔记/画像。
+// 使用独立 goroutine，失败静默忽略。
+func (a *Agent) maybeReviewMemory(userID string, messages []llm.ChatMessage) {
+	if config.Cfg.MemoryNudgeInterval <= 0 {
+		return
+	}
+	a.reviewMu.Lock()
+	a.turnsSinceReview[userID]++
+	current := a.turnsSinceReview[userID]
+	if current < config.Cfg.MemoryNudgeInterval {
+		a.reviewMu.Unlock()
+		logger.Debug("agent", userID, "", fmt.Sprintf("[memory-review] skip: turn %d/%d", current, config.Cfg.MemoryNudgeInterval), 0)
+		return
+	}
+	a.turnsSinceReview[userID] = 0
+	a.reviewMu.Unlock()
+
+	logger.Debug("agent", userID, "", fmt.Sprintf("[memory-review] triggered at turn %d, msgs=%d", current, len(messages)), 0)
+	snapshot := append([]llm.ChatMessage(nil), messages...) // 独立副本，避免并发修改
+	reviewMessages := append(snapshot, llm.ChatMessage{Role: "user", Content: memoryReviewPrompt})
+	memTool := tool.MemoryTool()
+	eventCh, err := a.llmClient.ChatStream(a.bgCtx, reviewMessages, []llm.Tool{memTool})
+	if err != nil {
+		logger.Warn("agent", userID, "", "[memory-review] llm call error: "+err.Error(), 0)
+		return
+	}
+
+	var toolCalls []llm.ToolCall
+	for ev := range eventCh {
+		if ev.Error != nil || ev.Done {
+			break
+		}
+		if len(ev.ToolCalls) > 0 {
+			toolCalls = ev.ToolCalls
+		}
+	}
+
+	if len(toolCalls) == 0 {
+		logger.Debug("agent", userID, "", "[memory-review] LLM found nothing to save", 0)
+		return
+	}
+	logger.Debug("agent", userID, "", fmt.Sprintf("[memory-review] LLM called %d tool(s)", len(toolCalls)), 0)
+
+	toolCtx := tool.WithUserID(a.bgCtx, userID)
+	for _, tc := range toolCalls {
+		if tc.Function.Name == "memory" {
+			result, err := a.toolExec.Execute(toolCtx, "memory", tc.Function.Arguments)
+			if err != nil {
+				logger.Warn("agent", userID, "", "[memory-review] tool error: "+err.Error(), 0)
+			} else {
+				logger.Debug("agent", userID, "", "[memory-review] saved: "+truncate(result, 80), 0)
+			}
+		}
+	}
+	logger.Debug("agent", userID, "", "[memory-review] done", 0)
+}
+
+// ----- Honcho Layer 2 辅助方法 -----
+
+// honchoTurnContextBlock wraps the Honcho context string for injection into the user message
+// on turns 2+ (ephemeral — appended in-memory at LLM call time, never persisted to DB).
+func honchoTurnContextBlock(ctx string) string {
+	return "[System note: The following Honcho memory was retrieved from prior sessions. " +
+		"It is continuity context for this turn only, not new user input.]\n\n" +
+		"# Honcho Memory (cross-session context)\n" + ctx
+}
+
+// honchoContextQuery is the standard prefetch query sent to Honcho after each turn.
+const honchoContextQuery = "Summarize what you know about this user: identity, role, preferences, ongoing projects, communication style. Be concise."
+
+// honchoAddWithRetry calls AddMessage once, and on failure waits 500 ms then retries once.
+// Mirrors Hermes's single-retry policy for transient Honcho API errors.
+func honchoAddWithRetry(ctx context.Context, c interface {
+	AddMessage(context.Context, string, string, bool, string) error
+}, userID, sessionID string, isUser bool, msg string) error {
+	if err := c.AddMessage(ctx, userID, sessionID, isUser, msg); err != nil {
+		logger.Warn("agent", userID, sessionID, fmt.Sprintf("[honcho-sync] add failed, retrying in 500ms: %v", err), 0)
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return c.AddMessage(ctx, userID, sessionID, isUser, msg)
+	}
+	return nil
+}
+
+// syncToHoncho syncs the current turn's user+assistant messages to Honcho,
+// then kicks off a background prefetch of the next turn's context.
+// Fix 3: caller must call honchoWg.Add(1) before launching this as a goroutine;
+// this function calls Done() on return so Shutdown() can wait for completion.
+func (a *Agent) syncToHoncho(userID, sessionID, userMsg, assistantMsg string) {
+	defer a.honchoWg.Done()
+	logger.Debug("agent", userID, sessionID, fmt.Sprintf("[honcho-sync] start: user_msg_len=%d assistant_msg_len=%d", len(userMsg), len(assistantMsg)), 0)
+	ctx, cancel := context.WithTimeout(a.bgCtx, 30*time.Second)
+	defer cancel()
+	if err := honchoAddWithRetry(ctx, a.honchoClient, userID, sessionID, true, userMsg); err != nil {
+		logger.Warn("agent", userID, sessionID, "[honcho-sync] add user msg failed after retry: "+err.Error(), 0)
+		return
+	}
+	if err := honchoAddWithRetry(ctx, a.honchoClient, userID, sessionID, false, assistantMsg); err != nil {
+		logger.Warn("agent", userID, sessionID, "[honcho-sync] add assistant msg failed after retry: "+err.Error(), 0)
+		return
+	}
+	logger.Debug("agent", userID, sessionID, "[honcho-sync] ✓ both messages synced, launching prefetch", 0)
+	// Prefetch next-turn context in background (so next call to buildSystemPrompt finds it ready)
+	go a.prefetchHonchoContext(userID, sessionID)
+}
+
+// prefetchHonchoContext fetches the latest Honcho context for the user and stores it in the cache.
+// Called asynchronously after each turn so the next turn's system prompt has it ready.
+func (a *Agent) prefetchHonchoContext(userID, sessionID string) {
+	logger.Debug("agent", userID, sessionID, "[honcho-prefetch] start", 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	content, err := a.honchoClient.Chat(ctx, userID, sessionID, honchoContextQuery)
+	if err != nil {
+		logger.Warn("agent", userID, "", "[honcho-prefetch] chat: "+err.Error(), 0)
+		return
+	}
+	if content == "" {
+		return
+	}
+	a.honchoCtxMu.Lock()
+	a.honchoCtxCache[userID] = content
+	a.honchoCtxMu.Unlock()
+	logger.Debug("agent", userID, "", "[honcho-prefetch] context cached: "+truncate(content, 60), 0)
 }

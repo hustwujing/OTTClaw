@@ -12,6 +12,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -183,10 +187,45 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	srv := &http.Server{Handler: r}
-	ln = tcpNoDelayListener{ln}
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+
+	// 将 Serve 放入后台 goroutine，main 阻塞在信号等待上。
+	// 这样 shutdown 在 main goroutine 中同步完成后自然返回，
+	// 所有 defer 均正常触发（atexit 等价），避免 os.Exit 绕过清理逻辑。
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		if err := srv.Serve(tcpNoDelayListener{ln}); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// 阻塞直到收到信号
+	<-quit
+	logger.Info("main", "", "", "shutdown signal received, draining...", 0)
+
+	// 停止所有飞书长连接（阻止新的 agent 调用，让进行中的 runAgent 靠 botCtx 取消）
+	feishu.Registry.StopAll()
+
+	// agent.Shutdown() 和 srv.Shutdown() 必须并行：
+	// agent.Shutdown() 第一步关闭 shutdownCh，通知 SSE handler 取消 agentCtx；
+	// SSE handler 收到信号后快速退出，srv.Shutdown() 才能完成连接排空。
+	// 若串行（先 srv 后 agent），两者互相等待，导致 srv.Shutdown() 等满 30s 超时。
+	agentDone := make(chan struct{})
+	go func() {
+		agent.Get().Shutdown(30 * time.Second)
+		close(agentDone)
+	}()
+
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		logger.Warn("main", "", "", "http server shutdown error: "+err.Error(), 0)
 	}
+
+	// 等待后台任务（bgWg / honchoWg）全部完成
+	<-agentDone
+	logger.Info("main", "", "", "graceful shutdown complete", 0)
+	// main 自然返回，所有 defer 正常执行
 }
 
 // tcpNoDelayListener 包装 net.Listener，对每个 Accept 的 TCP 连接设置 NoDelay。

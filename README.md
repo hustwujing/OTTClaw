@@ -22,7 +22,9 @@ Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.m
 - **零代码扩展**：通过 Markdown 文件定义 这只龙虾 的角色和技能，修改即生效，无需重新编译
 - **Agent 循环**：LLM 自动调用工具、处理结果、持续推理，直到完成任务
 - **多 LLM 支持**：OpenAI / Anthropic / 任何 OpenAI 兼容接口，支持多节点 round-robin 负载均衡
-- **浏览器自动化**：稳定的浏览器操作，内置 Playwright sidecar，支持爬取、填表、截图，按用户隔离 Cookie 和登录态，让你搜集资料方便快捷
+- **浏览器自动化**：稳定的浏览器操作，内置 Playwright sidecar，支持爬取、填表、截图，按用户隔离 Cookie 和登录态
+- **长期记忆**：跨会话持久化 Agent 笔记（环境约定、用户偏好）与用户人设；内置后台 flush/review 机制，配合跨会话全文搜索召回历史上下文
+- **自我进化技能**：Agent 自动将高频重复操作提炼为技能，近似 LFU 淘汰冷门技能，持续优化工作流程
 - **多平台接入**：内置 Web 界面、飞书长连接、企业微信 Webhook、Python 终端客户端
 - **完整工具集**：文件系统、Shell 执行（带审批流）、KV 存储、定时任务、MCP 集成、Office 文档生成
 
@@ -45,6 +47,14 @@ Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.m
 │                        ▼                  ▼         │
 │                   纯文字回复          技能/脚本/      │
 │                   → 结束循环          浏览器/KV…      │
+│                                           │         │
+│              ┌────────────────────────────┘         │
+│              ▼                                      │
+│  ┌──────────────────────────────────────────────┐   │
+│  │              长期记忆层                       │   │
+│  │  notes/persona 写入  ·  session_search 召回  │   │
+│  │  后台 flush/review   ·  自我进化技能提炼      │   │
+│  └──────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
   │
   ▼
@@ -247,30 +257,115 @@ AI：好的，先告诉我触发时机和执行流程…（引导完成后热更
 
 `config/ROLE.md` 定义 AI 的身份、行为规则和语气风格，直接注入系统提示词。无需直接编辑该文件，初始化阶段系统会引导管理员以对话方式生成。
 
+### 长期记忆
+
+Agent 拥有两层跨会话持久记忆：
+
+- **notes**：Agent 自身的环境笔记，用 `§` 分隔条目，记录工具特性、环境约定、稳定规律等
+- **persona**：用户人设，记录用户姓名、角色、偏好、沟通风格等自由文本
+
+每次会话结束后，Agent 会在后台自动 flush 新知识到记忆；每隔 N 轮还会触发 review，清理过时条目。所有写入前均进行安全扫描，拦截不可见 Unicode 字符和 prompt injection 尝试。
+
+**跨会话搜索（`session_search`）**：Agent 可通过 FTS5 全文检索历史会话，以关键词为锚点居中截取上下文窗口，调用辅助 LLM 生成摘要，召回当前 context window 之外的历史信息。无查询词时直接返回近期会话元数据，零额外 LLM 开销。
+
+### 自我进化技能
+
+Agent 在完成高频重复操作后，会自动将操作流程提炼为技能文件，写入 `self-improving/skills/` 目录，热更新后下次直接复用，无需重新推理。
+
+技能库按近似 LFU（最近最少使用）策略管理容量：
+- 每次加载技能时更新使用计数，计数器按配置的半衰期自动衰减
+- 超出上限时淘汰得分最低的技能
+- 新技能有保护窗口，窗口期内不参与淘汰
+
+所有自进化写入同样经过安全扫描：SKILL.md 检查 prompt injection，`script/` 文件额外检查反弹 Shell / base64+exec / curl|sh 等危险命令模式。
+
 ---
 
 ## 配置参考
 
-所有配置通过 `.env` 或系统环境变量设置，优先级：系统环境变量 > `.env` > 代码默认值。
+所有配置通过 `.env` 或系统环境变量设置，优先级：系统环境变量 > `.env` > 代码默认值。完整配置项见 [`.env.example`](.env.example)。
+
+### 核心配置
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `SERVER_PORT` | `8081` | 监听端口 |
+| `SERVER_PORT` | `8080` | 监听端口 |
 | `JWT_SECRET` | _(需修改)_ | JWT 签名密钥，**生产环境必须更换** |
 | `LLM_PROVIDER` | `openai` | `openai` 或 `anthropic` |
 | `LLM_BASE_URL` | `https://api.openai.com` | API 基础地址 |
 | `LLM_API_KEY` | _(必填)_ | API Key |
 | `LLM_MODEL` | `gpt-4o` | 模型名称 |
+| `LLM_MAX_TOKENS` | `8096` | 最大输出 token 数（Anthropic 必填） |
 | `LLM_RPM` | `0` | 每分钟最大请求数，0 不限制 |
 | `AGENT_MAX_ITERATIONS` | `20` | Agent 单轮最大 LLM 调用次数 |
 | `DATABASE_DRIVER` | `sqlite` | `sqlite` 或 `mysql` |
-| `MAX_CONTEXT_TOKENS` | `6000` | 触发历史压缩的 token 估算阈值 |
-| `BROWSER_HEADLESS` | `true` | 浏览器是否无头模式 |
-| `FEISHU_ENCRYPT_KEY` | _(空)_ | 飞书 AppSecret 加密密钥（使用飞书集成时必填） |
+| `DATABASE_PATH` | `data/data.db` | SQLite 文件路径 |
+| `MAX_CONTEXT_TOKENS` | `20000` | 触发历史压缩的 token 估算阈值 |
+| `COMPRESS_KEEP_RECENT` | `10` | 压缩时保留最新的 N 条消息不参与摘要 |
 
-多节点负载均衡：在 `.env` 中添加 `LLM_BASE_URL_2`、`LLM_API_KEY_2` 等，框架自动 round-robin。
+多节点负载均衡：在 `.env` 中添加 `LLM_BASE_URL_2`、`LLM_API_KEY_2`、`LLM_MODEL_2` 等，框架自动 round-robin。最多支持 10 个节点。
 
-完整配置项见 [`.env.example`](.env.example)。
+### 长期记忆
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MEMORY_ENABLED` | `true` | 是否启用 memory 工具；`false` 时工具不暴露给 LLM |
+| `MEMORY_FLUSH_MIN_TURNS` | `6` | 触发会话结束 flush 所需最少 user 消息数，0 禁用 |
+| `MEMORY_NUDGE_INTERVAL` | `10` | 后台 review 触发轮次间隔，0 禁用 |
+| `MEMORY_NOTES_CHAR_LIMIT` | `2200` | Agent notes 字符上限 |
+| `MEMORY_PERSONA_CHAR_LIMIT` | `1375` | 用户人设字符上限 |
+| `SESSION_SEARCH_ENABLED` | `true` | 是否启用跨会话全文搜索工具 |
+| `SESSION_SEARCH_SUMMARY_MAX_CHARS` | `50000` | 摘要上下文窗口最大字符数（居中截断） |
+
+### 自我进化技能
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SELF_IMPROVING_MIN_TOOL_ITERS` | `3` | 触发自我进化所需最少工具调用轮次，0 禁用 |
+| `SELF_IMPROVING_MAX_SKILLS` | `20` | 每用户自进化技能上限，超出按 LFU 淘汰，0 禁用淘汰 |
+| `SELF_IMPROVING_LFU_DECAY_HOURS` | `24` | LFU 计数器半衰期（小时），越小衰减越快 |
+| `SELF_IMPROVING_PROTECT_MINUTES` | `60` | 新技能保护窗口（分钟），窗口内不参与淘汰，0 禁用 |
+
+### 浏览器自动化
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `BROWSER_HEADLESS` | `true` | 是否无头模式；调试时设 `false` 可看到浏览器窗口 |
+| `BROWSER_SERVER_PORT` | `9222` | Node.js Playwright sidecar 监听端口 |
+| `BROWSER_USER_DATA_BASE` | `data/browser-profiles` | per-user Chrome Profile 根目录 |
+
+### 飞书集成
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `FEISHU_ENCRYPT_KEY` | _(空)_ | AppSecret 加密密钥（使用飞书集成时必填） |
+| `FEISHU_API_BASE` | `https://open.feishu.cn` | 飞书 Open API 基础地址，私有部署时修改 |
+| `FEISHU_SPINNER_INTERVAL_MS` | `800` | 飞书侧 spinner 刷新间隔（毫秒） |
+| `FEISHU_PENDING_TIMEOUT_MIN` | `30` | 等待用户操作（上传文件等）超时分钟数 |
+
+### 工具行为
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `TOOL_SCRIPT_TIMEOUT_SEC` | `120` | run_script 工具执行超时（秒） |
+| `TOOL_EXEC_TIMEOUT_SEC` | `3600` | exec 工具总超时（秒） |
+| `TOOL_WEB_FETCH_TIMEOUT_SEC` | `30` | web_fetch HTTP 请求超时（秒） |
+| `TOOL_RESULT_MAX_DB_BYTES` | `5000` | 工具结果写入 DB 的最大字节数，超出截断 |
+| `DOWNLOAD_TTL_MIN` | `60` | output_file 生成的下载链接有效期（分钟） |
+| `FS_READ_MAX_BYTES` | `204800` | fs read 允许读取的最大字节数 |
+| `UPLOAD_MAX_BYTES` | `20971520` | 单次上传文件大小上限（20 MB） |
+| `MCP_CONFIG_PATH` | `config/mcp.json` | MCP server 配置文件路径 |
+
+### 外部服务（可选）
+
+| 变量 | 说明 |
+|---|---|
+| `NANO_BANANA_API_KEY` | 图像生成 API Key |
+| `TAVILY_API_KEY` | 网络搜索（tvly CLI） |
+| `FIRECRAWL_API_KEY` | 反爬回退（summarize CLI） |
+| `APIFY_API_TOKEN` | YouTube 字幕提取备用 |
+| `HONCHO_ENABLED` | 启用 Honcho AI-native memory 平台集成 |
+| `HONCHO_API_KEY` | Honcho API Key |
 
 ---
 
@@ -317,17 +412,20 @@ OTTClaw/
 ├── skills/
 │   ├── system/              # 内置系统技能
 │   └── users/               # 用户自定义技能
+│       └── {user}/
+│           └── self-improving/skills/  # 自我进化技能
 ├── internal/
-│   ├── agent/               # LLM Agent 核心循环
+│   ├── agent/               # LLM Agent 核心循环 + 自我进化
 │   ├── llm/                 # LLM 客户端（OpenAI / Anthropic）
-│   ├── tool/                # 工具注册与执行
-│   ├── skill/               # 技能加载与热更新
+│   ├── tool/                # 工具注册与执行（含 memory / session_search）
+│   ├── skill/               # 技能加载、热更新、LFU 管理、安全扫描
 │   ├── browser/             # Playwright sidecar 管理
 │   ├── handler/             # HTTP 路由（SSE / WebSocket）
-│   ├── storage/             # 数据库（SQLite / MySQL）
+│   ├── storage/             # 数据库（SQLite / MySQL）+ FTS5 全文索引
 │   ├── feishu/              # 飞书 SDK
 │   ├── wecom/               # 企业微信 SDK
 │   ├── cron/                # 定时任务
+│   ├── push/                # 服务端推送（cron 结果实时推送）
 │   └── mcp/                 # MCP 客户端
 ├── browser-server/
 │   └── server.js            # Node.js Playwright HTTP sidecar

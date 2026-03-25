@@ -55,6 +55,15 @@ func WS(c *gin.Context) {
 
 	logger.Info("ws", userID, sessionID, "websocket connected", time.Since(start))
 
+	// 服务器关闭时，主动发 Close frame 并关闭连接，使阻塞中的 ReadJSON 立即返回错误退出。
+	// WebSocket 是 hijacked 连接，srv.Shutdown() 不等待它，但仍需主动关闭避免 goroutine 泄漏。
+	go func() {
+		<-agent.Get().ShutdownCh()
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+		conn.Close()
+	}()
+
 	// 循环读取客户端消息
 	for {
 		var in wsInMsg

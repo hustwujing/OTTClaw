@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"OTTClaw/internal/agent"
 	"OTTClaw/internal/middleware"
 	"OTTClaw/internal/push"
 )
@@ -52,6 +53,9 @@ func Notify(c *gin.Context) {
 		case <-ticker.C:
 			fmt.Fprintf(c.Writer, ": heartbeat\n\n")
 			flusher.Flush()
+		case <-agent.Get().ShutdownCh():
+			// 服务关闭，主动结束长连接，让 srv.Shutdown() 能迅速回收
+			return
 		case <-c.Request.Context().Done():
 			return
 		}

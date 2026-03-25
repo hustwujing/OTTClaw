@@ -17,6 +17,27 @@ import (
 	"OTTClaw/internal/storage"
 )
 
+// resolveFeishuAppID 获取当前请求对应的飞书 appID。
+// 飞书发起的请求（runAgent 注入）优先从 context 获取；
+// Web/SSE/WS 请求从 DB 读取当前用户的飞书配置。
+func resolveFeishuAppID(ctx context.Context) (string, error) {
+	if appID := feishu.AppIDFromCtx(ctx); appID != "" {
+		return appID, nil
+	}
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		return "", fmt.Errorf("user_id not found in context")
+	}
+	cfg, err := storage.GetFeishuConfig(userID)
+	if err != nil {
+		return "", fmt.Errorf("get feishu config: %w", err)
+	}
+	if cfg == nil || cfg.AppID == "" {
+		return "", fmt.Errorf("飞书机器人尚未配置，请先调用 set_feishu_config 设置 app_id")
+	}
+	return cfg.AppID, nil
+}
+
 // handleFeishuSend 通过飞书 Bot API 向指定接收方发送文本消息或文件。
 // receive_id 传 "self" 时自动解析为当前用户绑定的飞书 open_id。
 func handleFeishuSend(ctx context.Context, argsJSON string) (string, error) {
@@ -39,6 +60,11 @@ func handleFeishuSend(ctx context.Context, argsJSON string) (string, error) {
 		args.ReceiveIDType = "open_id"
 	}
 
+	appID, err := resolveFeishuAppID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve feishu app_id: %w", err)
+	}
+
 	// "self" → 解析为当前用户绑定的飞书 ID，并根据前缀自动推断类型
 	if args.ReceiveID == "self" {
 		userID := userIDFromCtx(ctx)
@@ -59,19 +85,19 @@ func handleFeishuSend(ctx context.Context, argsJSON string) (string, error) {
 	// 发送文件（图片或普通文件）
 	if args.FilePath != "" {
 		if feishu.IsImagePath(args.FilePath) {
-			imageKey, err := feishu.UploadImage(args.FilePath)
+			imageKey, err := feishu.UploadImage(appID, args.FilePath)
 			if err != nil {
 				return "", fmt.Errorf("upload image: %w", err)
 			}
-			if err := feishu.SendImageTo(args.ReceiveID, args.ReceiveIDType, imageKey); err != nil {
+			if err := feishu.SendImageTo(appID, args.ReceiveID, args.ReceiveIDType, imageKey); err != nil {
 				return "", fmt.Errorf("feishu send image: %w", err)
 			}
 		} else {
-			fileKey, err := feishu.UploadFile(args.FilePath, "")
+			fileKey, err := feishu.UploadFile(appID, args.FilePath, "")
 			if err != nil {
 				return "", fmt.Errorf("upload file: %w", err)
 			}
-			if err := feishu.SendFileTo(args.ReceiveID, args.ReceiveIDType, fileKey); err != nil {
+			if err := feishu.SendFileTo(appID, args.ReceiveID, args.ReceiveIDType, fileKey); err != nil {
 				return "", fmt.Errorf("feishu send file: %w", err)
 			}
 		}
@@ -79,7 +105,7 @@ func handleFeishuSend(ctx context.Context, argsJSON string) (string, error) {
 	}
 
 	// 发送文本
-	if err := feishu.SendTextTo(args.ReceiveID, args.ReceiveIDType, args.Text); err != nil {
+	if err := feishu.SendTextTo(appID, args.ReceiveID, args.ReceiveIDType, args.Text); err != nil {
 		return "", fmt.Errorf("feishu send: %w", err)
 	}
 	return `"ok"`, nil
@@ -181,7 +207,7 @@ func handleSetFeishuConfig(ctx context.Context, argsJSON string) (string, error)
 		return "", fmt.Errorf("save feishu config: %w", err)
 	}
 
-	feishu.InvalidateToken()
+	feishu.InvalidateToken(appID)
 
 	if appID != "" {
 		newCfg, _ := storage.GetFeishuConfig(userID)

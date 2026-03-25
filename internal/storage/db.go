@@ -57,6 +57,27 @@ func InitDB() error {
 	}
 
 	DB = db
+
+	// SQLite FTS5 全文索引：为 origin_session_messages 建外部内容虚拟表 + 同步触发器
+	// MySQL 不支持 FTS5，跳过
+	if cfg.DatabaseDriver != "mysql" {
+		_ = db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+			content,
+			content="origin_session_messages",
+			content_rowid="id",
+			tokenize="unicode61"
+		)`).Error
+		_ = db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_fts_insert
+			AFTER INSERT ON origin_session_messages BEGIN
+				INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+			END`).Error
+		_ = db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_fts_delete
+			AFTER DELETE ON origin_session_messages BEGIN
+				INSERT INTO messages_fts(messages_fts, rowid, content)
+				VALUES ('delete', old.id, old.content);
+			END`).Error
+	}
+
 	return nil
 }
 
@@ -238,6 +259,32 @@ func DeleteSession(sessionID, userID string) error {
 	})
 }
 
+// SetSessionParent 设置会话的父会话 ID，用于显式续话或压缩衍生时建立血缘链。
+func SetSessionParent(sessionID, parentSessionID string) error {
+	return DB.Model(&Session{}).
+		Where("session_id = ?", sessionID).
+		Update("parent_session_id", parentSessionID).Error
+}
+
+// GetSessionLineage 沿 parent_session_id 链向上溯源，返回包含 sessionID 本身在内的
+// 完整血缘链（从自身到根，最多追溯 20 层，防止环路死循环）。
+// 结果用于 session_search 排除同一会话血缘的所有历史碎片。
+func GetSessionLineage(sessionID string) ([]string, error) {
+	const maxDepth = 20
+	lineage := make([]string, 0, 4)
+	cur := sessionID
+	for i := 0; i < maxDepth && cur != ""; i++ {
+		lineage = append(lineage, cur)
+		var s Session
+		result := DB.Select("parent_session_id").Where("session_id = ?", cur).First(&s)
+		if result.Error != nil {
+			break // 找不到则终止，不报错
+		}
+		cur = s.ParentSessionID
+	}
+	return lineage, nil
+}
+
 // UpdateSessionTitle 更新会话的 AI 生成标题
 func UpdateSessionTitle(sessionID, title string) error {
 	return DB.Model(&Session{}).
@@ -404,10 +451,38 @@ func GetUserProfile(userID string) (*UserProfile, error) {
 	return &p, result.Error
 }
 
-// UpsertUserProfile 创建或更新用户人设
+// UpsertUserProfile 创建或更新用户人设（仅更新 persona 列，不覆盖 notes）
 func UpsertUserProfile(userID, persona string) error {
-	p := &UserProfile{UserID: userID, Persona: persona}
-	return DB.Save(p).Error
+	result := DB.Model(&UserProfile{}).Where("user_id = ?", userID).Update("persona", persona)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return DB.Create(&UserProfile{UserID: userID, Persona: persona}).Error
+	}
+	return nil
+}
+
+// GetUserNotes 读取用户笔记，用户不存在时返回 ("", nil)
+func GetUserNotes(userID string) (string, error) {
+	var p UserProfile
+	result := DB.Select("notes").Where("user_id = ?", userID).First(&p)
+	if result.Error == gorm.ErrRecordNotFound {
+		return "", nil
+	}
+	return p.Notes, result.Error
+}
+
+// UpsertUserNotes 覆写用户笔记（仅更新 notes 列，不覆盖 persona）
+func UpsertUserNotes(userID, notes string) error {
+	result := DB.Model(&UserProfile{}).Where("user_id = ?", userID).Update("notes", notes)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return DB.Create(&UserProfile{UserID: userID, Notes: notes}).Error
+	}
+	return nil
 }
 
 // ----- TokenUsage CRUD -----
@@ -440,17 +515,6 @@ func AddTokenUsage(userID, sessionID, model string, prompt, completion int) erro
 	}).Error
 }
 
-// UpdateUserMemory 更新用户记忆（保留其他字段不变）
-func UpdateUserMemory(userID, memory string) error {
-	// 先确保记录存在
-	var count int64
-	DB.Model(&UserProfile{}).Where("user_id = ?", userID).Count(&count)
-	if count == 0 {
-		return DB.Create(&UserProfile{UserID: userID, Memory: memory}).Error
-	}
-	return DB.Model(&UserProfile{}).Where("user_id = ?", userID).Update("memory", memory).Error
-}
-
 // ----- OriginSessionMessage CRUD -----
 
 // AddOriginMessage 写入一条用户可见历史消息（不截断，支持附件）。
@@ -477,4 +541,154 @@ func GetOriginMessages(sessionID string) ([]OriginSessionMessage, error) {
 		Order("created_at ASC").
 		Find(&msgs).Error
 	return msgs, err
+}
+
+// ----- 跨会话全文搜索 -----
+
+// SessionSearchHit 单条命中消息（FTS5 / LIKE 搜索结果）
+type SessionSearchHit struct {
+	SessionID string
+	Content   string
+	CreatedAt time.Time
+}
+
+// SessionHitGroup 一个 session 中所有命中消息的集合
+type SessionHitGroup struct {
+	SessionID string
+	Hits      []SessionSearchHit
+	LastHitAt time.Time // 最新命中消息时间，用于排序
+}
+
+// GetRecentSessionMeta 按 updated_at 倒序返回用户最近 limit 条会话的元数据，
+// 不含 FTS 搜索，不调用 LLM，供 session_search 无查询词模式使用。
+// 排除 excludeSessionID（当前会话），limit 默认 5，最多 10。
+func GetRecentSessionMeta(userID, excludeSessionID string, limit int) ([]SessionPreview, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	var sessions []Session
+	err := DB.Where("user_id = ? AND session_id != ?", userID, excludeSessionID).
+		Order("updated_at DESC").
+		Limit(limit).
+		Find(&sessions).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SessionPreview, 0, len(sessions))
+	for _, s := range sessions {
+		preview := ""
+		var firstMsg SessionMessage
+		if err2 := DB.Where("session_id = ? AND role = ?", s.SessionID, "user").
+			Order("id ASC").First(&firstMsg).Error; err2 == nil {
+			runes := []rune(firstMsg.Content)
+			if len(runes) > 50 {
+				preview = string(runes[:50]) + "…"
+			} else {
+				preview = firstMsg.Content
+			}
+		}
+		result = append(result, SessionPreview{
+			SessionID: s.SessionID,
+			CreatedAt: s.CreatedAt,
+			UpdatedAt: s.UpdatedAt,
+			Title:     s.Title,
+			Preview:   preview,
+		})
+	}
+	return result, nil
+}
+
+// SearchSessionMessages 在当前用户历史会话中全文搜索，排除 excludeSessionIDs 列表中的所有会话
+// （通常为当前会话的完整血缘链，由 GetSessionLineage 获取），
+// 返回 top maxSessions 个 session 各自的命中消息（按 FTS5 rank 或关键词频次排序）。
+// SQLite 使用 FTS5；MySQL 降级为 LIKE 搜索。
+// 每个 SessionHitGroup 最多包含 5 条命中消息，结果按最近命中时间倒序。
+func SearchSessionMessages(userID, query string, excludeSessionIDs []string, maxSessions int) ([]SessionHitGroup, error) {
+	if maxSessions <= 0 {
+		maxSessions = 5
+	}
+
+	// 构建排除集合，加速过滤
+	excludeSet := make(map[string]bool, len(excludeSessionIDs))
+	for _, sid := range excludeSessionIDs {
+		excludeSet[sid] = true
+	}
+	// 取第一个 ID 用于 SQL 单值占位符（兼容旧逻辑），多余的在 Go 层过滤
+	excludePrimary := ""
+	if len(excludeSessionIDs) > 0 {
+		excludePrimary = excludeSessionIDs[0]
+	}
+
+	type row struct {
+		SessionID string
+		Content   string
+		CreatedAt time.Time
+	}
+
+	var rows []row
+	var err error
+
+	if config.Cfg.DatabaseDriver == "mysql" {
+		// MySQL 降级：LIKE 搜索（不支持 FTS5）
+		likeQuery := "%" + query + "%"
+		err = DB.Raw(`
+			SELECT session_id, content, created_at
+			FROM origin_session_messages
+			WHERE user_id = ? AND session_id != ? AND content LIKE ?
+			ORDER BY created_at DESC
+			LIMIT 100
+		`, userID, excludePrimary, likeQuery).Scan(&rows).Error
+	} else {
+		// SQLite FTS5 搜索
+		err = DB.Raw(`
+			SELECT m.session_id, m.content, m.created_at
+			FROM origin_session_messages m
+			JOIN messages_fts fts ON fts.rowid = m.id
+			WHERE fts.content MATCH ?
+			  AND m.user_id = ?
+			  AND m.session_id != ?
+			ORDER BY fts.rank
+			LIMIT 100
+		`, query, userID, excludePrimary).Scan(&rows).Error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search messages: %w", err)
+	}
+
+	// 按 session_id 分组（Go 层二次过滤，覆盖血缘链中非 excludePrimary 的其他会话）
+	groupMap := make(map[string]*SessionHitGroup)
+	var groupOrder []string // 保持首次出现顺序（FTS5 按 rank，LIKE 按时间）
+	for _, r := range rows {
+		if excludeSet[r.SessionID] { // 血缘链中除 excludePrimary 之外的其他祖先会话
+			continue
+		}
+		g, ok := groupMap[r.SessionID]
+		if !ok {
+			if len(groupOrder) >= maxSessions {
+				continue
+			}
+			g = &SessionHitGroup{SessionID: r.SessionID}
+			groupMap[r.SessionID] = g
+			groupOrder = append(groupOrder, r.SessionID)
+		}
+		if len(g.Hits) < 5 {
+			g.Hits = append(g.Hits, SessionSearchHit{
+				SessionID: r.SessionID,
+				Content:   r.Content,
+				CreatedAt: r.CreatedAt,
+			})
+			if r.CreatedAt.After(g.LastHitAt) {
+				g.LastHitAt = r.CreatedAt
+			}
+		}
+	}
+
+	result := make([]SessionHitGroup, 0, len(groupOrder))
+	for _, sid := range groupOrder {
+		result = append(result, *groupMap[sid])
+	}
+	return result, nil
 }

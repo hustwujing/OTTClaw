@@ -52,6 +52,20 @@ func SetAgentRunner(fn AgentRunFunc) {
 	agentRunner = fn
 }
 
+// ── Context key：注入飞书 appID，供 tool/feishu.go 无需额外存储查询时直接获取 ──
+
+type appIDCtxKey struct{}
+
+// AppIDFromCtx 从 context 中取出飞书 appID（飞书发起的请求会注入；Web 请求返回空串）
+func AppIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(appIDCtxKey{}).(string)
+	return v
+}
+
+func withAppIDCtx(ctx context.Context, appID string) context.Context {
+	return context.WithValue(ctx, appIDCtxKey{}, appID)
+}
+
 // ── Registry：管理每个用户的长连接客户端 ─────────────────────────────────────
 
 type registry struct {
@@ -110,6 +124,16 @@ func (r *registry) StopForUser(ownerUserID string) {
 	}
 }
 
+// StopAll 停止所有飞书长连接（服务关闭时调用）
+func (r *registry) StopAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for uid, cancel := range r.cancels {
+		cancel()
+		delete(r.cancels, uid)
+	}
+}
+
 // run 实际启动长连接（阻塞；ctx 取消时退出）
 func (r *registry) run(ctx context.Context, ownerUserID, appID, appSecret string) {
 	logger.Info("feishu", ownerUserID, "", fmt.Sprintf("starting ws client appID=%s", appID), 0)
@@ -117,8 +141,8 @@ func (r *registry) run(ctx context.Context, ownerUserID, appID, appSecret string
 	SetCredentials(appID, appSecret)
 
 	eventHandler := dispatcher.NewEventDispatcher("", "").
-		OnP2MessageReceiveV1(makeMessageHandler(ownerUserID)).
-		OnP2CardActionTrigger(makeCardActionHandler(ownerUserID))
+		OnP2MessageReceiveV1(makeMessageHandler(ctx, ownerUserID, appID)).
+		OnP2CardActionTrigger(makeCardActionHandler(ctx, ownerUserID, appID))
 
 	wsClient := larkws.NewClient(appID, appSecret,
 		larkws.WithEventHandler(eventHandler),
@@ -135,7 +159,7 @@ func (r *registry) run(ctx context.Context, ownerUserID, appID, appSecret string
 
 // ── 消息事件处理器 ─────────────────────────────────────────────────────────────
 
-func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+func makeMessageHandler(botCtx context.Context, ownerUserID, appID string) func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	return func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 		if event.Event == nil || event.Event.Message == nil || event.Event.Sender == nil {
 			return nil
@@ -196,7 +220,7 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 
 			// 检查是否在等待特定类型的回复
 			if kind, ok := PopPending(sessionID); ok {
-				handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, content, messageID, kind)
+				handleSpecialReply(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, msgType, content, messageID, kind)
 				return
 			}
 
@@ -204,7 +228,7 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 			case "text", "post":
 				text := extractText(msgType, content)
 				if text != "" {
-					runAgent(ownerUserID, sessionID, peer, receiveIDType, text)
+					runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, text)
 				}
 			case "image":
 				var imgContent struct {
@@ -213,12 +237,12 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 				if err := json.Unmarshal([]byte(content), &imgContent); err != nil || imgContent.ImageKey == "" {
 					return
 				}
-				path, err := DownloadResource(messageID, imgContent.ImageKey, "image", config.Cfg.UploadDir)
+				path, err := DownloadResource(appID, messageID, imgContent.ImageKey, "image", config.Cfg.UploadDir)
 				if err != nil {
 					logger.Warn("feishu", ownerUserID, sessionID, fmt.Sprintf("download image: %v", err), 0)
 					return
 				}
-				runAgent(ownerUserID, sessionID, peer, receiveIDType, fmt.Sprintf("[文件: %s]", path))
+				runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, fmt.Sprintf("[文件: %s]", path))
 			case "file", "audio", "video":
 				var fileContent struct {
 					FileKey  string `json:"file_key"`
@@ -227,7 +251,7 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 				if err := json.Unmarshal([]byte(content), &fileContent); err != nil || fileContent.FileKey == "" {
 					return
 				}
-				path, err := DownloadResource(messageID, fileContent.FileKey, "file", config.Cfg.UploadDir)
+				path, err := DownloadResource(appID, messageID, fileContent.FileKey, "file", config.Cfg.UploadDir)
 				if err != nil {
 					logger.Warn("feishu", ownerUserID, sessionID, fmt.Sprintf("download %s: %v", msgType, err), 0)
 					return
@@ -236,10 +260,10 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 				if fileContent.FileName != "" {
 					userMsg += "\n文件名: " + fileContent.FileName
 				}
-				runAgent(ownerUserID, sessionID, peer, receiveIDType, userMsg)
+				runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, userMsg)
 			default:
 				if msgType != "" {
-					_ = SendTextTo(peer, receiveIDType, "暂不支持 "+msgType+" 类型的消息，请发送文字、图片、音频或文件。")
+					_ = SendTextTo(appID, peer, receiveIDType, "暂不支持 "+msgType+" 类型的消息，请发送文字、图片、音频或文件。")
 				}
 			}
 		}()
@@ -249,7 +273,7 @@ func makeMessageHandler(ownerUserID string) func(ctx context.Context, event *lar
 }
 
 // handleSpecialReply 处理处于等待状态时收到的回复（如图片/文件上传、选项确认）
-func handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, content, messageID string, kind pendingKind) {
+func handleSpecialReply(botCtx context.Context, ownerUserID, sessionID, peer, receiveIDType, appID, msgType, content, messageID string, kind pendingKind) {
 	switch kind {
 	case PendingChoice:
 		// 用户以文字回复了选项或确认，直接透传给 agent
@@ -257,7 +281,7 @@ func handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, co
 		if text == "" {
 			text = content
 		}
-		runAgent(ownerUserID, sessionID, peer, receiveIDType, text)
+		runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, text)
 
 	case PendingUpload:
 		if msgType == "image" {
@@ -265,13 +289,13 @@ func handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, co
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgContent); err == nil && imgContent.ImageKey != "" {
-				path, err := DownloadResource(messageID, imgContent.ImageKey, "image", config.Cfg.UploadDir)
+				path, err := DownloadResource(appID, messageID, imgContent.ImageKey, "image", config.Cfg.UploadDir)
 				if err != nil {
 					logger.Warn("feishu", ownerUserID, sessionID, fmt.Sprintf("download image: %v", err), 0)
-					runAgent(ownerUserID, sessionID, peer, receiveIDType, "图片上传失败，请重试")
+					runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, "图片上传失败，请重试")
 					return
 				}
-				runAgent(ownerUserID, sessionID, peer, receiveIDType, fmt.Sprintf("[文件: %s]", path))
+				runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, fmt.Sprintf("[文件: %s]", path))
 				return
 			}
 		}
@@ -281,17 +305,17 @@ func handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, co
 				FileName string `json:"file_name"`
 			}
 			if err := json.Unmarshal([]byte(content), &fileContent); err == nil && fileContent.FileKey != "" {
-				path, err := DownloadResource(messageID, fileContent.FileKey, "file", config.Cfg.UploadDir)
+				path, err := DownloadResource(appID, messageID, fileContent.FileKey, "file", config.Cfg.UploadDir)
 				if err != nil {
 					logger.Warn("feishu", ownerUserID, sessionID, fmt.Sprintf("download %s: %v", msgType, err), 0)
-					runAgent(ownerUserID, sessionID, peer, receiveIDType, "文件上传失败，请重试")
+					runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, "文件上传失败，请重试")
 					return
 				}
 				userMsg := fmt.Sprintf("[文件: %s]", path)
 				if fileContent.FileName != "" {
 					userMsg += "\n文件名: " + fileContent.FileName
 				}
-				runAgent(ownerUserID, sessionID, peer, receiveIDType, userMsg)
+				runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, userMsg)
 				return
 			}
 		}
@@ -300,7 +324,7 @@ func handleSpecialReply(ownerUserID, sessionID, peer, receiveIDType, msgType, co
 		if text == "" {
 			text = "skip"
 		}
-		runAgent(ownerUserID, sessionID, peer, receiveIDType, text)
+		runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, text)
 	}
 }
 
@@ -341,8 +365,9 @@ func extractText(msgType, content string) string {
 }
 
 // runAgent 启动 agent 处理并将结果写回飞书
-func runAgent(ownerUserID, sessionID, peer, receiveIDType, userText string) {
-	w := newFeishuWriter(peer, receiveIDType, ownerUserID, sessionID)
+// ctx 为 botCtx（服务关闭时取消），appID 注入到 agentCtx 供工具层使用
+func runAgent(ctx context.Context, ownerUserID, sessionID, peer, receiveIDType, appID, userText string) {
+	w := newFeishuWriter(peer, receiveIDType, ownerUserID, sessionID, appID)
 	defer w.close()
 
 	if agentRunner == nil {
@@ -350,7 +375,8 @@ func runAgent(ownerUserID, sessionID, peer, receiveIDType, userText string) {
 		return
 	}
 
-	if err := agentRunner(context.Background(), ownerUserID, sessionID, userText, w); err != nil {
+	agentCtx := withAppIDCtx(ctx, appID)
+	if err := agentRunner(agentCtx, ownerUserID, sessionID, userText, w); err != nil {
 		logger.Error("feishu", ownerUserID, sessionID, "agent run", err, 0)
 	}
 }
@@ -368,6 +394,7 @@ type feishuWriter struct {
 	receiveIDType string
 	ownerUserID   string
 	sessionID     string
+	appID         string // 发送方 Bot 的 appID，用于 API 鉴权
 
 	mu            sync.Mutex
 	textBuf       strings.Builder
@@ -376,15 +403,16 @@ type feishuWriter struct {
 	spinnerCancel context.CancelFunc // 停止动画帧刷新
 }
 
-func newFeishuWriter(peer, receiveIDType, ownerUserID, sessionID string) *feishuWriter {
+func newFeishuWriter(peer, receiveIDType, ownerUserID, sessionID, appID string) *feishuWriter {
 	w := &feishuWriter{
 		peer:          peer,
 		receiveIDType: receiveIDType,
 		ownerUserID:   ownerUserID,
 		sessionID:     sessionID,
+		appID:         appID,
 	}
 	// 立即发送等待提示（交互卡片），让用户知道消息已收到，后续可 PATCH 更新为最终回复
-	id, err := SendCardGetID(peer, receiveIDType, spinnerFrames[0])
+	id, err := SendCardGetID(appID, peer, receiveIDType, spinnerFrames[0])
 	if err != nil {
 		logger.Warn("feishu", ownerUserID, sessionID, fmt.Sprintf("send ack: %v", err), 0)
 	} else {
@@ -411,7 +439,7 @@ func (w *feishuWriter) runSpinner(ctx context.Context) {
 			if done || ackMsgID == "" {
 				return
 			}
-			_ = UpdateCard(ackMsgID, spinnerFrames[frame%len(spinnerFrames)])
+			_ = UpdateCard(w.appID, ackMsgID, spinnerFrames[frame%len(spinnerFrames)])
 			frame++
 		case <-ctx.Done():
 			return
@@ -446,13 +474,13 @@ func (w *feishuWriter) sendFinal(text string) {
 	}
 
 	if ackMsgID != "" {
-		if err := UpdateCard(ackMsgID, text); err != nil {
+		if err := UpdateCard(w.appID, ackMsgID, text); err != nil {
 			logger.Warn("feishu", w.ownerUserID, w.sessionID,
 				fmt.Sprintf("update card failed (%v), falling back to new message", err), 0)
-			_ = SendTextTo(w.peer, w.receiveIDType, text)
+			_ = SendTextTo(w.appID, w.peer, w.receiveIDType, text)
 		}
 	} else {
-		if err := SendTextTo(w.peer, w.receiveIDType, text); err != nil {
+		if err := SendTextTo(w.appID, w.peer, w.receiveIDType, text); err != nil {
 			logger.Warn("feishu", w.ownerUserID, w.sessionID,
 				fmt.Sprintf("send final message failed: %v", err), 0)
 		}
@@ -503,11 +531,11 @@ func (w *feishuWriter) WriteImage(url string) error {
 	if err != nil {
 		return err
 	}
-	imageKey, err := UploadImage(localPath)
+	imageKey, err := UploadImage(w.appID, localPath)
 	if err != nil {
 		return fmt.Errorf("feishu upload image: %w", err)
 	}
-	return SendImageTo(w.peer, w.receiveIDType, imageKey)
+	return SendImageTo(w.appID, w.peer, w.receiveIDType, imageKey)
 }
 
 // WriteError 向飞书发送错误提示
@@ -540,17 +568,17 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 	text = strings.TrimSpace(mdImageRe.ReplaceAllString(text, ""))
 	if text != "" {
 		if ackMsgID != "" {
-			if err := UpdateCard(ackMsgID, text); err != nil {
+			if err := UpdateCard(w.appID, ackMsgID, text); err != nil {
 				logger.Warn("feishu", w.ownerUserID, w.sessionID,
 					fmt.Sprintf("update card (interactive prefix) failed (%v), sending new message", err), 0)
-				_ = SendTextTo(w.peer, w.receiveIDType, text)
+				_ = SendTextTo(w.appID, w.peer, w.receiveIDType, text)
 			}
 		} else {
-			_ = SendTextTo(w.peer, w.receiveIDType, text)
+			_ = SendTextTo(w.appID, w.peer, w.receiveIDType, text)
 		}
 	} else if ackMsgID != "" {
 		// 没有文字前缀，将等待提示更新为空白占位，避免残留"正在处理"
-		if err := UpdateCard(ackMsgID, "👇"); err != nil {
+		if err := UpdateCard(w.appID, ackMsgID, "👇"); err != nil {
 			logger.Warn("feishu", w.ownerUserID, w.sessionID,
 				fmt.Sprintf("update ack placeholder failed: %v", err), 0)
 		}
@@ -578,7 +606,7 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, o.Label))
 		}
 		MarkPending(w.sessionID, PendingChoice)
-		return SendTextTo(w.peer, w.receiveIDType, strings.TrimRight(sb.String(), "\n"))
+		return SendTextTo(w.appID, w.peer, w.receiveIDType, strings.TrimRight(sb.String(), "\n"))
 
 	case "confirm":
 		type confirmPayload struct {
@@ -601,7 +629,7 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 		}
 		msg := fmt.Sprintf("%s\n\n请回复「%s」或「%s」", payload.Message, confirmLabel, cancelLabel)
 		MarkPending(w.sessionID, PendingChoice)
-		return SendTextTo(w.peer, w.receiveIDType, msg)
+		return SendTextTo(w.appID, w.peer, w.receiveIDType, msg)
 
 	case "file_upload":
 		type uploadPayload struct {
@@ -617,7 +645,7 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 		}
 		hint += "\n（直接发送图片，或回复 skip 跳过）"
 		MarkPending(w.sessionID, PendingUpload)
-		return SendTextTo(w.peer, w.receiveIDType, hint)
+		return SendTextTo(w.appID, w.peer, w.receiveIDType, hint)
 	}
 
 	return nil
@@ -632,7 +660,7 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 //  2. 优先以 openID（单聊场景）查找会话；若无则以 chatID（群聊场景）查找/创建
 //  3. 异步调用 runAgent，向当前会话注入用户选择
 //  4. 立即返回 toast 确认，防止飞书超时报错
-func makeCardActionHandler(ownerUserID string) func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+func makeCardActionHandler(botCtx context.Context, ownerUserID, appID string) func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	return func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 		if event.Event == nil {
 			return &callback.CardActionTriggerResponse{}, nil
@@ -684,7 +712,7 @@ func makeCardActionHandler(ownerUserID string) func(ctx context.Context, event *
 			}
 			logger.Info("feishu", ownerUserID, sessionID,
 				fmt.Sprintf("card action: peer=%s choice=%q", peer, choiceText), 0)
-			runAgent(ownerUserID, sessionID, peer, receiveIDType, choiceText)
+			runAgent(botCtx, ownerUserID, sessionID, peer, receiveIDType, appID, choiceText)
 		}()
 
 		// 立即返回 toast，告知飞书已受理，避免超时报错

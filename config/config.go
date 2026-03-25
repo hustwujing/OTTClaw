@@ -88,9 +88,6 @@ type AppConfig struct {
 	FeishuSpinnerIntervalMs int    // FEISHU_SPINNER_INTERVAL_MS：飞书侧 spinner 动画刷新间隔毫秒数，默认 800
 	FeishuPendingTimeoutMin int    // FEISHU_PENDING_TIMEOUT_MIN：等待用户操作（上传文件等）的超时分钟数，默认 30
 
-	// 用户记忆
-	UserMemoryMaxChars int // USER_MEMORY_MAX_CHARS：用户记忆最大字符数，超出自动压缩，默认 500
-
 	// nano-banana 图像生成
 	NanoBananaAPIKey  string // NANO_BANANA_API_KEY：Bilibili LLM API 密钥（必填）
 	NanoBananaBaseURL string // NANO_BANANA_BASE_URL：API 基础地址，默认 http://llmapi.bilibili.co/v1
@@ -100,6 +97,9 @@ type AppConfig struct {
 	AgentMaxIterations        int    // AGENT_MAX_ITERATIONS：LLM 循环最大轮数，默认 20
 	ProgressLabel             string // PROGRESS_LABEL：进度事件的 step 标识，前端可展示，默认 "progress"
 	SelfImprovingMinToolIters int    // SELF_IMPROVING_MIN_TOOL_ITERS：触发自我进化技能生成所需的最少工具调用轮次，默认 3
+	SelfImprovingMaxSkills      int // SELF_IMPROVING_MAX_SKILLS：每用户允许保留的自进化技能上限，超出时按近似 LFU 淘汰，默认 20，0 禁用
+	SelfImprovingLFUDecayHours  int // SELF_IMPROVING_LFU_DECAY_HOURS：近似 LFU 计数器半衰期（小时），默认 24
+	SelfImprovingProtectMinutes int // SELF_IMPROVING_PROTECT_MINUTES：新技能保护窗口（分钟），窗口内不参与淘汰，默认 60，0 禁用
 
 	// 浏览器自动化
 	BrowserServerPort   string // BROWSER_SERVER_PORT：Node.js Playwright sidecar 监听端口，默认 9222
@@ -134,6 +134,24 @@ type AppConfig struct {
 
 	// MCP 外接能力
 	MCPConfigPath string // MCP_CONFIG_PATH：MCP server 配置文件路径，默认 config/mcp.json
+
+	// 长期记忆
+	MemoryEnabled          bool // MEMORY_ENABLED：是否启用 memory 工具（notes/persona 读写），默认 true
+	MemoryFlushMinTurns    int  // MEMORY_FLUSH_MIN_TURNS：触发 session 结束 flush 所需的最少 user 消息数，默认 6，0 禁用
+	MemoryNudgeInterval    int  // MEMORY_NUDGE_INTERVAL：后台 review 触发轮次间隔，默认 10，0 禁用
+	MemoryNotesCharLimit   int  // MEMORY_NOTES_CHAR_LIMIT：Agent notes 字符上限，默认 2200
+	MemoryPersonaCharLimit int  // MEMORY_PERSONA_CHAR_LIMIT：用户人设字符上限，默认 1375
+
+	// 跨会话搜索
+	SessionSearchEnabled         bool // SESSION_SEARCH_ENABLED：是否启用 session_search 工具，默认 true
+	SessionSearchSummaryMaxChars int  // SESSION_SEARCH_SUMMARY_MAX_CHARS：摘要上下文窗口最大字符数，默认 50000
+
+	// Honcho AI-native memory platform
+	HonchoEnabled bool   // HONCHO_ENABLED：是否启用 Honcho 集成，默认 false
+	HonchoBaseURL string // HONCHO_BASE_URL：Honcho API 地址，默认 https://demo.honcho.dev
+	HonchoAPIKey  string // HONCHO_API_KEY：Honcho API 密钥
+	HonchoAppID   string // HONCHO_APP_ID：预先创建的 App ID（空则用 HonchoAppName 自动 get_or_create）
+	HonchoAppName string // HONCHO_APP_NAME：Honcho 应用名称，默认 ottclaw
 }
 
 // Cfg 全局配置单例，进程启动时初始化一次
@@ -209,13 +227,15 @@ func loadConfig() *AppConfig {
 		FeishuAPIBase:           getEnv("FEISHU_API_BASE", "https://open.feishu.cn"),
 		FeishuSpinnerIntervalMs: getEnvInt("FEISHU_SPINNER_INTERVAL_MS", 800),
 		FeishuPendingTimeoutMin: getEnvInt("FEISHU_PENDING_TIMEOUT_MIN", 30),
-		UserMemoryMaxChars:      getEnvInt("USER_MEMORY_MAX_CHARS", 500),
 		NanoBananaAPIKey:        getEnv("NANO_BANANA_API_KEY", ""),
 		NanoBananaBaseURL:       getEnv("NANO_BANANA_BASE_URL", "http://llmapi.bilibili.co/v1"),
 		NanoBananaModel:         getEnv("NANO_BANANA_MODEL", "ppio/nano-banana-pro"),
 		AgentMaxIterations:        getEnvInt("AGENT_MAX_ITERATIONS", 20),
 		ProgressLabel:             getEnv("PROGRESS_LABEL", "progress"),
 		SelfImprovingMinToolIters: getEnvInt("SELF_IMPROVING_MIN_TOOL_ITERS", 3),
+		SelfImprovingMaxSkills:      getEnvInt("SELF_IMPROVING_MAX_SKILLS", 20),
+		SelfImprovingLFUDecayHours:  getEnvInt("SELF_IMPROVING_LFU_DECAY_HOURS", 24),
+		SelfImprovingProtectMinutes: getEnvInt("SELF_IMPROVING_PROTECT_MINUTES", 60),
 		BrowserServerPort:       getEnv("BROWSER_SERVER_PORT", "9222"),
 		BrowserServerScript:     getEnv("BROWSER_SERVER_SCRIPT", "browser-server/server.js"),
 		BrowserHeadless:         getEnv("BROWSER_HEADLESS", "true") != "false",
@@ -232,6 +252,18 @@ func loadConfig() *AppConfig {
 		ReadFileMaxBytes:        getEnvInt("READ_FILE_MAX_BYTES", 20*1024*1024),
 		ReadImageMaxBytes:       getEnvInt("READ_IMAGE_MAX_BYTES", 5*1024*1024),
 		MCPConfigPath:           getEnv("MCP_CONFIG_PATH", "config/mcp.json"),
+		MemoryEnabled:          getEnvBool("MEMORY_ENABLED", true),
+		MemoryFlushMinTurns:    getEnvInt("MEMORY_FLUSH_MIN_TURNS", 6),
+		MemoryNudgeInterval:    getEnvInt("MEMORY_NUDGE_INTERVAL", 10),
+		MemoryNotesCharLimit:   getEnvInt("MEMORY_NOTES_CHAR_LIMIT", 2200),
+		MemoryPersonaCharLimit: getEnvInt("MEMORY_PERSONA_CHAR_LIMIT", 1375),
+		SessionSearchEnabled:         getEnvBool("SESSION_SEARCH_ENABLED", true),
+		SessionSearchSummaryMaxChars: getEnvInt("SESSION_SEARCH_SUMMARY_MAX_CHARS", 50000),
+		HonchoEnabled:          getEnvBool("HONCHO_ENABLED", false),
+		HonchoBaseURL:          getEnv("HONCHO_BASE_URL", "https://demo.honcho.dev"),
+		HonchoAPIKey:           getEnv("HONCHO_API_KEY", ""),
+		HonchoAppID:            getEnv("HONCHO_APP_ID", ""),
+		HonchoAppName:          getEnv("HONCHO_APP_NAME", "ottclaw"),
 	}
 	cfg.LLMEndpoints = loadLLMEndpoints(cfg.LLMProvider, cfg.LLMMaxTokens, cfg.LLMRateLimit)
 	return cfg
@@ -258,6 +290,15 @@ func loadDotEnv(path string) {
 		return
 	}
 	dotEnvCache = m
+}
+
+// getEnvBool 按优先级返回 bool 配置值。
+// "false" / "0" 视为 false，其余非空值视为 true，空值使用默认值。
+func getEnvBool(key string, defaultVal bool) bool {
+	if s := getEnv(key, ""); s != "" {
+		return s != "false" && s != "0"
+	}
+	return defaultVal
 }
 
 // getEnvInt 按优先级返回 int 配置值，解析失败时使用默认值
