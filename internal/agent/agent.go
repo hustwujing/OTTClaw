@@ -916,6 +916,7 @@ Universal: These rules are absolute and apply to all roles and scenarios without
 # Available Tools
 Refer to the parameter descriptions in the tool definitions for usage. If unsure, call get_tool_doc(name) to view the tool's detailed documentation.
 In conversation history, user messages prefixed with "[工具 X 结果]:" are historical tool results stored for context — do NOT output text in this format yourself; always invoke tools via the real tool-calling interface.
+For reading code or documentation files, always prefer code_search over fs: use outline to get file structure first, then chunk_read to read specific sections. Use fs.read only for config, binary, or uploaded files.
 
 %s
 

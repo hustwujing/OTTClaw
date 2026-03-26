@@ -359,7 +359,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "fs",
-				Description: "File system ops. action: list / stat / read (images→multimodal; text max 512KB) / write (uploads/output/skills/ only) / delete / move / mkdir.",
+				Description: "File system ops. For code/doc files prefer code_search (outline/chunk_read/grep) over read. action: list / stat / read (images→multimodal; text max 512KB) / write (uploads/output/skills/ only) / delete / move / mkdir.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -525,7 +525,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "code_search",
-				Description: "Explore codebase (tree for directory listing / grep for content search). Call get_tool_doc(\"code_search\") first for full parameter docs.",
+				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files page by page with line numbers\n• git — trace code history (log/blame/diff/show/status/branch/tag)\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},

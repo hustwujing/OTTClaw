@@ -141,10 +141,12 @@ func newOpenAIClient() *openAIClient {
 type openAIFullResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *openAIUsage `json:"usage"`
 }
 
 // ChatSync 发起非流式请求（stream=false），阻塞直到收到完整文本回复。
@@ -237,6 +239,64 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		// 代理将 stream=true 请求转发给后端，但后端返回了非流式响应，导致代理报 500。
+		// 错误体含 "expected stream response" 时，自动降级为 stream=false 重试。
+		if resp.StatusCode == http.StatusInternalServerError &&
+			bytes.Contains(b, []byte("expected stream response")) {
+			return c.doSyncFallback(ctx, messages, tools)
+		}
+		return nil, fmt.Errorf("llm api error %d: %s", resp.StatusCode, string(b))
+	}
+
+	// 按实际 Content-Type 分叉：代理可能在 stream=true 请求下静默返回非流式 JSON（200），
+	// 此时 Content-Type 为 application/json 而非 text/event-stream。
+	// 检测到降级时走 parseOpenAIFullAsStream，将完整响应模拟成流事件，调用方无感知。
+	ct := resp.Header.Get("Content-Type")
+	events := make(chan StreamEvent, 1)
+	go func() {
+		defer resp.Body.Close()
+		defer close(events)
+		if strings.Contains(ct, "text/event-stream") {
+			parseOpenAIStream(ctx, resp.Body, events)
+		} else {
+			parseOpenAIFullAsStream(ctx, resp.Body, events)
+		}
+	}()
+
+	return events, nil
+}
+
+// doSyncFallback 当 stream=true 请求返回 500 "expected stream response" 时，
+// 降级为 stream=false 重新请求，并将结果通过 parseOpenAIFullAsStream 模拟成流事件。
+func (c *openAIClient) doSyncFallback(ctx context.Context, messages []ChatMessage, tools []Tool) (<-chan StreamEvent, error) {
+	req := openAIRequest{
+		Model:    c.model,
+		Messages: toOpenAIMessages(messages),
+		Stream:   false,
+		Tools:    tools,
+	}
+	if c.maxTokens > 0 {
+		req.MaxTokens = c.maxTokens
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sync-fallback request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build sync-fallback http request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sync-fallback http request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, fmt.Errorf("llm api error %d: %s", resp.StatusCode, string(b))
 	}
 
@@ -244,10 +304,53 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 	go func() {
 		defer resp.Body.Close()
 		defer close(events)
-		parseOpenAIStream(ctx, resp.Body, events)
+		parseOpenAIFullAsStream(ctx, resp.Body, events)
 	}()
-
 	return events, nil
+}
+
+// parseOpenAIFullAsStream 将非流式 JSON 响应（代理降级时出现）解析后模拟成流事件。
+// 文本内容作为单条 TextChunk 发出，工具调用作为 ToolCalls 事件发出，最后发 Done。
+func parseOpenAIFullAsStream(ctx context.Context, r io.Reader, events chan<- StreamEvent) {
+	send := func(ev StreamEvent) {
+		select {
+		case events <- ev:
+		case <-ctx.Done():
+		}
+	}
+
+	b, err := io.ReadAll(r)
+	if err != nil {
+		send(StreamEvent{Error: fmt.Errorf("read sync-fallback response: %w", err)})
+		return
+	}
+
+	var full openAIFullResponse
+	if err := json.Unmarshal(b, &full); err != nil {
+		send(StreamEvent{Error: fmt.Errorf("parse sync-fallback response: %w", err)})
+		return
+	}
+	if len(full.Choices) == 0 {
+		send(StreamEvent{Error: fmt.Errorf("empty choices in sync-fallback response")})
+		return
+	}
+
+	choice := full.Choices[0]
+	if choice.Message.Content != "" {
+		send(StreamEvent{TextChunk: choice.Message.Content})
+	}
+	if len(choice.Message.ToolCalls) > 0 {
+		send(StreamEvent{ToolCalls: choice.Message.ToolCalls})
+	}
+	ev := StreamEvent{Done: true}
+	if full.Usage != nil {
+		ev.Usage = &Usage{
+			PromptTokens:     full.Usage.PromptTokens,
+			CompletionTokens: full.Usage.CompletionTokens,
+			TotalTokens:      full.Usage.TotalTokens,
+		}
+	}
+	send(ev)
 }
 
 // parseOpenAIStream 逐行读取 SSE 流，累积 tool_calls，将 text delta 和最终 tool_calls 发送到 channel
