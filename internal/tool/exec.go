@@ -8,14 +8,14 @@
 // 执行流程（两步 + 可选轮询）：
 //
 //  1. exec(command, ...)
-//       创建 pending 记录 → 通过 InteractiveSender 向前端推送确认框
-//       → 返回 {status:"pending_approval", pending_id:"..."}
-//       LLM 收到后必须停止，等待用户在下一轮点击确认/取消。
+//     创建 pending 记录 → 通过 InteractiveSender 向前端推送确认框
+//     → 返回 {status:"pending_approval", pending_id:"..."}
+//     LLM 收到后必须停止，等待用户在下一轮点击确认/取消。
 //
 //  2. 用户点击「确认执行」→ 文本作为下一条用户消息发回
 //     LLM 调用 exec_run(pending_id) 真正执行命令
-//       → 命令在 yield_ms 内完成：同步返回完整输出
-//       → 超过 yield_ms 仍在运行：后台化，返回 session_id
+//     → 命令在 yield_ms 内完成：同步返回完整输出
+//     → 超过 yield_ms 仍在运行：后台化，返回 session_id
 //
 //  3. 用 process(action="poll", session_id=...) 轮询后台命令输出和状态
 //
@@ -118,8 +118,8 @@ type execSession struct {
 	doneCh    chan struct{}
 	readDone  chan struct{} // 关闭时表示 pty read goroutine 已退出，所有输出已落入缓冲
 
-	ptmx *os.File   // PTY master fd；nil 表示已关闭
-	cmd  *exec.Cmd  // 用于 process kill 动作
+	ptmx *os.File  // PTY master fd；nil 表示已关闭
+	cmd  *exec.Cmd // 用于 process kill 动作
 
 	// 全量输出缓冲（线程安全，供 process log）
 	aggBuf execBuf
@@ -380,7 +380,7 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 		defer cancelCmd()
 		defer close(sess.doneCh)
 		_ = cmd.Wait()
-		ptmx.Close() // 触发 read goroutine 的 EIO/EOF
+		ptmx.Close()    // 触发 read goroutine 的 EIO/EOF
 		<-sess.readDone // 确保所有输出已落入缓冲
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			sess.timedOut = true
@@ -439,10 +439,16 @@ func killGroup(cmd *exec.Cmd) error {
 
 func execDoneResult(sess *execSession) string {
 	elapsed := int(time.Since(sess.startedAt).Seconds())
+	output := sess.fullOutput()
+	// 空输出时注入 exit code 标注，防止 LLM 因空工具结果误判任务已结束。
+	// [exec:exit=N] 仅含技术数值，无自然语言词汇，不会被 LLM 学习模仿。
+	if strings.TrimSpace(output) == "" {
+		output = fmt.Sprintf("[exec:exit=%d]", sess.exitCode)
+	}
 	result := map[string]any{
 		"status":      "done",
 		"exit_code":   sess.exitCode,
-		"output":      sess.fullOutput(),
+		"output":      output,
 		"elapsed_sec": elapsed,
 	}
 	if sess.timedOut {

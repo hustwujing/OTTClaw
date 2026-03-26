@@ -1178,11 +1178,16 @@ func isUIOnlyTool(tc llm.ToolCall) bool {
 func isMimickedPlaceholder(text string) bool {
 	t := strings.TrimSpace(text)
 	switch t {
-	case "...", "[ok]", "…", "(continued)", "OK", "ok", "[no result]":
+	case "...", "[ok]", "…", "(continued)", "OK", "ok", "[no result]",
+		`{"ok":true}`, `{"ok": true}`: // Execute 兜底注入的空工具结果格式
 		return true
 	}
 	// 纯标点/省略号组合
 	if len(t) <= 6 && strings.Trim(t, ".…。·") == "" {
+		return true
+	}
+	// exec 空输出注入格式：[exec:exit=N]，N 为任意数字
+	if strings.HasPrefix(t, "[exec:exit=") && strings.HasSuffix(t, "]") {
 		return true
 	}
 	return false

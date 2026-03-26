@@ -227,7 +227,14 @@ func (e *Executor) Execute(ctx context.Context, name, argsJSON string) (string, 
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %q", name)
 	}
-	return h(ctx, argsJSON)
+	result, err := h(ctx, argsJSON)
+	// 工具调用成功但无输出时返回 {"ok":true}，防止 LLM 因空工具结果误判任务已结束退出循环。
+	// 纯 JSON 格式，LLM 不会将其当作对话文本输出。
+	// exec 已在 execDoneResult 中单独处理（含 exit code），此处作为其余工具的统一兜底。
+	if err == nil && strings.TrimSpace(result) == "" {
+		result = `{"ok":true}`
+	}
+	return result, err
 }
 
 // ToolDefinitions 返回所有工具的 LLM function calling 定义。
@@ -379,7 +386,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "exec",
-				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
+				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. For commands that produce no output (mkdir, chmod, cp, mv, git add, touch, etc.), append \"; echo '[cmd:exit=$?]'\" so the result is never empty. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
