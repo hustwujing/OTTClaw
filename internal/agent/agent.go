@@ -1077,9 +1077,9 @@ func formatToolCall(name, argsJSON string) string {
 			b, _ := json.Marshal(args[k])
 			s = string(b)
 		}
-		parts = append(parts, k+"="+truncate(s, 32))
+		parts = append(parts, k+"="+truncate(s, 64))
 	}
-	return name + "(" + strings.Join(parts, ", ") + ")"
+	return (name + "(" + strings.Join(parts, ", ") + ")")[0:512]
 }
 
 // extractWebURL 从普通工具结果 JSON 中提取 webUrl 字段（camelCase）。
