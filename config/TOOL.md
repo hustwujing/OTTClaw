@@ -208,7 +208,7 @@ code_search(action="chunk_read", path="internal/agent/agent.go", chunk=3, chunk_
 - `pattern` (string, optional): file path (blame/diff) or `--grep` keyword (log)
 - `n` (int, optional): max entries for log, default 20
 
-Use when: understanding code history, finding who changed a line, seeing what changed in a commit.
+Use when: simple git lookups — basic log, show a commit, diff a revision, blame a file, check status. For complex queries needing date arithmetic, author filters, pipes, custom formats, or multi-command chains, use exec instead.
 ```
 code_search(action="git", path=".", git_action="log", n=10)
 code_search(action="git", path=".", git_action="blame", pattern="internal/agent/agent.go")

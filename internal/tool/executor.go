@@ -386,7 +386,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "exec",
-				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. For commands that produce no output (mkdir, chmod, cp, mv, git add, touch, etc.), append \"; echo '[cmd:exit=$?]'\" so the result is never empty. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
+				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. For simple git lookups (log/show/diff/blame/status with basic options), prefer code_search(action=git); use exec for git commands that need shell features (date arithmetic, author filters, pipes, custom formats, multi-command chains). For commands that produce no output (mkdir, chmod, cp, mv, git add, touch, etc.), append \"; echo '[cmd:exit=$?]'\" so the result is never empty. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

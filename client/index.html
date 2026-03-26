@@ -423,6 +423,19 @@ details[open] .proc-chevron { transform: rotate(90deg); }
 .c-red   { color: #ef4444; }
 .c-blue  { color: #3b82f6; }
 .c-gray  { color: var(--muted); }
+/* ── 等待状态动画 ───────────────────────────────────────────────── */
+@keyframes spin      { to { transform: rotate(360deg); } }
+@keyframes fade-dots { 0%,100%{ opacity:.25 } 50%{ opacity:1 } }
+.spinner {
+  display: inline-block; width: 10px; height: 10px;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  border-radius: 50%; animation: spin .8s linear infinite;
+  vertical-align: -1px;
+}
+.step-pending .step-detail { opacity: .75; }
+.step-pending .step-detail::after {
+  content: ' …'; animation: fade-dots 1.4s ease-in-out infinite;
+}
 
 /* interactive */
 .ia-wrap { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -1157,6 +1170,7 @@ async function streamSSE(message, bubble, signal) {
           }
 
           case 'end': {
+            clearLLMWait(bubble);
             rmTyping(bubble);
             bubble.querySelectorAll('.status-line').forEach(el => el.remove());
             bubble.querySelector('.proc-log')?.removeAttribute('open');
@@ -1373,12 +1387,13 @@ function addAIBubble() {
 }
 
 const STEP_META = {
-  tool_call:      { icon: '⚙',  cls: 'c-amber', label: '调用工具' },
-  tool_done:      { icon: '✓',  cls: 'c-green', label: '工具完成' },
-  tool_error:     { icon: '✗',  cls: 'c-red',   label: '工具失败' },
-  compress_start: { icon: '📦', cls: 'c-gray',  label: '正在压缩'  },
-  compress_done:  { icon: '✓',  cls: 'c-green', label: '压缩完成' },
-  compress_error: { icon: '✗',  cls: 'c-red',   label: '压缩失败' },
+  llm_call:       { pending: true,  cls: 'c-blue',  label: '思考中'   },
+  tool_call:      { pending: true,  cls: 'c-amber', label: '调用工具' },
+  tool_done:      { icon: '✓',     cls: 'c-green', label: '工具完成' },
+  tool_error:     { icon: '✗',     cls: 'c-red',   label: '工具失败' },
+  compress_start: { pending: true,  cls: 'c-gray',  label: '正在压缩' },
+  compress_done:  { icon: '✓',     cls: 'c-green', label: '压缩完成' },
+  compress_error: { icon: '✗',     cls: 'c-red',   label: '压缩失败' },
 };
 
 function appendProg(bubble, step, detail, ms) {
@@ -1389,7 +1404,7 @@ function appendProg(bubble, step, detail, ms) {
       `<span class="step-name c-blue">${escHtml(step)}</span>` +
       `<span class="status-text">${escHtml(detail)}</span>`;
     if (bubble.querySelector('.bubble-text')) {
-      bubble.appendChild(line);              // 文字已出现：追加到末尾，不往上推
+      bubble.appendChild(line);
     } else {
       const anchor = bubble.querySelector('.typing');
       if (anchor) bubble.insertBefore(line, anchor);
@@ -1403,18 +1418,63 @@ function appendProg(bubble, step, detail, ms) {
   procLog.classList.remove('hidden');
 
   const steps = procLog.querySelector('.proc-steps');
-  const meta  = STEP_META[step] || { icon: '•', cls: 'c-gray', label: step };
+  const meta  = STEP_META[step];
+  const refreshCount = () => {
+    procLog.querySelector('.proc-count').textContent = `${steps.children.length} 步`;
+  };
 
+  // 完成事件：找到对应 pending 行，原地更新为完成状态，不新增行
+  const parentStep = { tool_done: 'tool_call', tool_error: 'tool_call',
+                       compress_done: 'compress_start', compress_error: 'compress_start' }[step];
+  if (parentStep) {
+    const pending = [...steps.querySelectorAll(`.proc-step[data-step="${parentStep}"]`)].pop();
+    if (pending) {
+      pending.classList.remove('step-pending');
+      const iconEl = pending.querySelector('.step-icon');
+      iconEl.className = `step-icon ${meta.cls}`;
+      iconEl.innerHTML = meta.icon;
+      if (detail) { const d = pending.querySelector('.step-detail'); if (d) d.textContent = detail; }
+      if (ms) {
+        let msEl = pending.querySelector('.step-ms');
+        if (!msEl) { msEl = document.createElement('span'); msEl.className = 'step-ms'; pending.appendChild(msEl); }
+        msEl.textContent = `${ms}ms`;
+      }
+      return;
+    }
+  }
+
+  // tool_call 到来时清除 llm_call 等待行（LLM 已响应，进入工具执行阶段）
+  if (step === 'tool_call') {
+    steps.querySelectorAll('.proc-step[data-step="llm_call"]').forEach(r => r.remove());
+    refreshCount();
+  }
+
+  // 新增行
   const line = el('div', 'proc-step');
+  if (meta.pending) line.classList.add('step-pending');
+  line.dataset.step = step;
+  const iconHtml = meta.pending
+    ? `<span class="step-icon ${meta.cls}"><span class="spinner"></span></span>`
+    : `<span class="step-icon ${meta.cls}">${meta.icon}</span>`;
   line.innerHTML =
-    `<span class="step-icon ${meta.cls}">${meta.icon}</span>` +
+    iconHtml +
     `<span class="step-name">${escHtml(meta.label)}</span>` +
     (detail ? `<span class="step-detail">${escHtml(detail)}</span>` : '') +
-    (ms     ? `<span class="step-ms">${ms}ms</span>` : '');
+    (!meta.pending && ms ? `<span class="step-ms">${ms}ms</span>` : '');
   steps.appendChild(line);
+  refreshCount();
+}
 
-  const n = steps.children.length;
-  procLog.querySelector('.proc-count').textContent = `${n} 步`;
+// clearLLMWait 清除 proc-log 中的"思考中"等待行（llm_call 步骤）
+// 若清完后无剩余步骤，则重新隐藏 proc-log（避免显示空的"0步"）
+function clearLLMWait(bubble) {
+  const procLog = bubble?.querySelector('.proc-log');
+  if (!procLog) return;
+  const steps = procLog.querySelector('.proc-steps');
+  steps.querySelectorAll('.proc-step[data-step="llm_call"]').forEach(r => r.remove());
+  const count = steps.children.length;
+  procLog.querySelector('.proc-count').textContent = `${count} 步`;
+  if (count === 0) procLog.classList.add('hidden');
 }
 
 function appendError(bubble, msg) {
@@ -1530,6 +1590,7 @@ function subscribeNotify(sessionId) {
       }
       case 'end':
         if (!bubble) break;
+        clearLLMWait(bubble);
         rmTyping(bubble);
         bubble.querySelectorAll('.status-line').forEach(el => el.remove());
         bubble.querySelector('.proc-log')?.removeAttribute('open');

@@ -238,6 +238,8 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	hasCompressed := false // 每次 Run() 只允许压缩一次，防止「压缩 → 工具执行 → 再次超限 → 再压缩」循环
 	hasFlushed := false    // Fix 1: 防止压缩前 flush 与会话结束 flush 重复触发
 	toolCallIters := 0     // 有工具调用的迭代轮次数，用于判断是否触发自我进化技能生成
+	nudgeCount := 0        // 「不完整响应」nudge 次数上限，防止模型卡在同一个不完整输出反复循环
+	midStream429 := 0      // 流读取阶段 429 重试次数（最多 2 次）
 	tmp := llm.ChatMessage{Role: "user", Content: logUserInput(userInput)}
 	newestUsrMsg, _ := json.Marshal(tmp)
 	for iter := 0; iter < maxIterations; iter++ {
@@ -299,24 +301,50 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				fmt.Sprintf("llm input iter=%d", iter), data, 0)
 		}
 
-		// 调用 LLM 流式接口（含重试：EOF 等瞬时网络错误最多重试 1 次）
-		const llmMaxRetries = 1
+		// 通知客户端：即将调用 LLM，进入等待状态（前端可展示 thinking 动画）
+		_ = writer.WriteProgress("llm_call", "思考中", time.Since(start).Milliseconds())
+
+		// 调用 LLM 流式接口
+		// 重试策略：
+		//   - 429 限速：最多重试 3 次，退避 3s / 8s / 15s，期间推送友好进度给用户
+		//   - 瞬时网络错误（EOF/broken pipe 等）：最多重试 1 次，500ms 后重试
+		//   - 其他错误：直接失败，显示友好文案（不暴露原始 API 错误）
 		var eventCh <-chan llm.StreamEvent
-		for attempt := 0; ; attempt++ {
-			var err error
-			eventCh, err = a.llmClient.ChatStream(ctx, messages, tools)
-			if err == nil {
-				break
+		{
+			var retries429, retriesTransient int
+			backoff429 := []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second}
+			for {
+				var err error
+				eventCh, err = a.llmClient.ChatStream(ctx, messages, tools)
+				if err == nil {
+					break
+				}
+				if is429Err(err) && retries429 < len(backoff429) {
+					wait := backoff429[retries429]
+					retries429++
+					logger.Warn("llm", userID, sessionID,
+						fmt.Sprintf("llm rate limited (retry %d/%d), waiting %v", retries429, len(backoff429), wait), 0)
+					_ = writer.WriteProgress("llm_call",
+						fmt.Sprintf("服务繁忙，正在重试 (%d/%d)…", retries429, len(backoff429)),
+						time.Since(start).Milliseconds())
+					select {
+					case <-time.After(wait):
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					continue
+				}
+				if isTransientErr(err) && retriesTransient < 1 {
+					retriesTransient++
+					logger.Warn("llm", userID, sessionID,
+						fmt.Sprintf("llm transient error (retry %d), retrying: %v", retriesTransient, err), 0)
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				logger.Error("llm", userID, sessionID, "llm stream error", err, time.Since(iterStart))
+				_ = writer.WriteError(friendlyLLMErr(err))
+				return err
 			}
-			if attempt < llmMaxRetries && isTransientErr(err) {
-				logger.Warn("llm", userID, sessionID,
-					fmt.Sprintf("llm call transient error (attempt %d), retrying: %v", attempt+1, err), 0)
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-			logger.Error("llm", userID, sessionID, "llm stream error", err, time.Since(iterStart))
-			_ = writer.WriteError("LLM 调用失败: " + err.Error())
-			return err
 		}
 
 		// 收集本轮输出
@@ -324,6 +352,15 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		var toolCalls []llm.ToolCall
 		var streamErr error
 		var iterUsage *llm.Usage
+
+		// </think> 过滤状态（适用于 Kimi K2.5 等 reasoning 模型）。
+		// 这类模型先输出思考链，以 </think> 结束，再输出真正的回答。
+		// thinkChecked：是否已判断过当前响应是否以 <think> 开头。
+		// thinkEnded：思考链是否已结束（或根本不存在思考链）。
+		// ⚠️ 初始值均为 false；若模型不输出 <think>，首次见到内容后立即将
+		//    thinkEnded 置为 true 并正常发送，避免普通模型文字被全部丢弃。
+		thinkChecked := false
+		thinkEnded := false
 
 		for ev := range eventCh {
 			if ev.Error != nil {
@@ -335,11 +372,53 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				break
 			}
 			if ev.TextChunk != "" {
-				// 实时流式发送文本 chunk 给客户端
-				if err := writer.WriteText(ev.TextChunk); err != nil {
-					logger.Warn("agent", userID, sessionID, "write text chunk failed", 0)
-				}
 				textBuf.WriteString(ev.TextChunk)
+
+				if !thinkChecked {
+					// 首次看到非空内容：判断是否以 <think> 开头
+					current := strings.TrimSpace(textBuf.String())
+					if current == "" {
+						continue
+					}
+					thinkChecked = true
+					if !strings.HasPrefix(current, "<think>") {
+						// 普通模型（无思考链）：立即将已缓冲文字全部发送
+						thinkEnded = true
+						if clean := stripInjectedPlaceholders(current); clean != "" {
+							if err := writer.WriteText(clean); err != nil {
+								logger.Warn("agent", userID, sessionID, "write text chunk failed", 0)
+							}
+						}
+						// 本 chunk 已处理完毕
+						if len(ev.ToolCalls) > 0 {
+							toolCalls = ev.ToolCalls
+						}
+						continue
+					}
+					// 以 <think> 开头：进入思考链过滤分支（fall-through）
+				}
+
+				if !thinkEnded {
+					// 在已积累的全量文本中查找 </think> 标记
+					if idx := strings.Index(textBuf.String(), "</think>"); idx >= 0 {
+						thinkEnded = true
+						// 仅发送 </think> 之后的部分给客户端
+						after := strings.TrimSpace(textBuf.String()[idx+len("</think>"):])
+						if clean := stripInjectedPlaceholders(after); clean != "" {
+							if err := writer.WriteText(clean); err != nil {
+								logger.Warn("agent", userID, sessionID, "write text chunk failed", 0)
+							}
+						}
+					}
+					// </think> 尚未出现：思考链内容暂不发给客户端
+				} else {
+					// 思考链已结束，正常推送当前 chunk
+					if clean := stripInjectedPlaceholders(ev.TextChunk); clean != "" {
+						if err := writer.WriteText(clean); err != nil {
+							logger.Warn("agent", userID, sessionID, "write text chunk failed", 0)
+						}
+					}
+				}
 			}
 			if len(ev.ToolCalls) > 0 {
 				toolCalls = ev.ToolCalls
@@ -380,9 +459,30 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}(*iterUsage)
 		}
 
+		// 流读取阶段的 429 限速：整轮重试（最多 2 次，退避 5s / 15s）。
+		// ChatStream() 调用前已有一套 429 重试，此处专门处理读流到一半被限速的情况。
+		// 注意：partial 输出已通过 WriteText 发给客户端，重试后 LLM 会重新生成，
+		// 客户端会看到续写的内容——代价可接受，远好于直接报错。
+		if streamErr != nil && is429Err(streamErr) && midStream429 < 2 {
+			midStream429++
+			wait := []time.Duration{5 * time.Second, 15 * time.Second}[midStream429-1]
+			logger.Warn("llm", userID, sessionID,
+				fmt.Sprintf("llm stream 429 mid-stream (retry %d/2), waiting %v", midStream429, wait), 0)
+			_ = writer.WriteProgress("llm_call",
+				fmt.Sprintf("服务繁忙，正在重试 (%d/2)…", midStream429),
+				time.Since(start).Milliseconds())
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			iter-- // 重试本轮（不消耗迭代次数）
+			continue
+		}
+
 		if streamErr != nil {
 			logger.Error("llm", userID, sessionID, "stream read error", streamErr, time.Since(iterStart))
-			_ = writer.WriteError("读取 LLM 流失败")
+			_ = writer.WriteError(friendlyLLMErr(streamErr))
 			return streamErr
 		}
 
@@ -401,7 +501,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 
 		// 情况 A：无工具调用 → 普通回答，保存并结束循环
 		if len(toolCalls) == 0 {
-			assistantText := textBuf.String()
+			// stripThinkPrefix：去除 reasoning 模型思考链（</think> 之前的内容），
+			// 确保存入 DB、history 及 isMimickedPlaceholder 检查的都是真正的回答文本。
+			assistantText := stripThinkPrefix(textBuf.String())
 			// LLM 返回了空文字（无工具调用、无文字），补充 fallback 提示避免无声结束
 			if assistantText == "" {
 				assistantText = "（我已完成处理，但没有返回说明。如果结果不符合预期，请重新描述你的需求。）"
@@ -415,6 +517,21 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					fmt.Sprintf("LLM output mimicked placeholder %q at iter=%d, retrying", assistantText, iter), 0)
 				messages = append(messages, llm.ChatMessage{Role: "assistant", Content: assistantText})
 				messages = append(messages, llm.ChatMessage{Role: "user", Content: "请继续完成任务，不要只回复占位符。"})
+				tmp1, _ := json.Marshal(messages[len(messages)-2])
+				tmp2, _ := json.Marshal(messages[len(messages)-1])
+				newestUsrMsg = []byte(fmt.Sprintf("%s\t%s", string(tmp1), string(tmp2)))
+				continue
+			}
+			// 模型输出了"准备做某事"的文字（如 "让我分析...："），但没有实际调用工具。
+			// 常见于 reasoning 模型（Kimi K2.5）在思考链之后给出意图描述但忘记 tool call。
+			// 最多允许 nudge 2 次，防止模型卡住反复触发。
+			if isIncompleteResponse(assistantText) && iter < maxIterations-1 && nudgeCount < 2 {
+				nudgeCount++
+				logger.Warn("agent", userID, sessionID,
+					fmt.Sprintf("LLM response incomplete (no tool call, nudge=%d) %q at iter=%d",
+						nudgeCount, assistantText, iter), 0)
+				messages = append(messages, llm.ChatMessage{Role: "assistant", Content: assistantText})
+				messages = append(messages, llm.ChatMessage{Role: "user", Content: "请继续完成操作，直接调用相应的工具执行，不要只描述要做什么。"})
 				tmp1, _ := json.Marshal(messages[len(messages)-2])
 				tmp2, _ := json.Marshal(messages[len(messages)-1])
 				newestUsrMsg = []byte(fmt.Sprintf("%s\t%s", string(tmp1), string(tmp2)))
@@ -478,7 +595,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		// 只能看到用户凭空发来"确认创建"，导致重复触发确认流程（死循环）。
 		// toolCallsJSON 存入独立字段，供下轮对话重建 ToolCalls（Anthropic 需要 tool_use/tool_result 对齐）。
 		semanticCalls := filterSemanticCalls(toolCalls)
-		assistantMsgContent := textBuf.String()
+		assistantMsgContent := stripThinkPrefix(textBuf.String())
 		if len(semanticCalls) > 0 || assistantMsgContent != "" {
 			var toolCallsJSON string
 			if len(semanticCalls) > 0 {
@@ -916,7 +1033,7 @@ Universal: These rules are absolute and apply to all roles and scenarios without
 # Available Tools
 Refer to the parameter descriptions in the tool definitions for usage. If unsure, call get_tool_doc(name) to view the tool's detailed documentation.
 In conversation history, user messages prefixed with "[工具 X 结果]:" are historical tool results stored for context — do NOT output text in this format yourself; always invoke tools via the real tool-calling interface.
-For reading code or documentation files, always prefer code_search over fs or exec: use outline to get file structure first, then chunk_read to read specific sections. Never use exec to run cat/sed/grep/find on source files — use code_search actions instead.
+For reading code or documentation files, always prefer code_search over fs or exec: use outline to get file structure first, then chunk_read to read specific sections. Never use exec to run cat/sed/grep/find on source files — use code_search actions instead. For simple git lookups (basic log/show/diff/blame/status), prefer code_search(action=git); use exec when git commands need shell features like date arithmetic, author filtering, pipes, custom formats, or multi-command chains.
 
 %s
 
@@ -1173,13 +1290,79 @@ func isUIOnlyTool(tc llm.ToolCall) bool {
 	return tc.Function.Name == "notify" && notifyAction(tc.Function.Arguments) == "progress"
 }
 
+// stripInjectedPlaceholders 从 LLM 流式 chunk 中剔除程序自身注入的占位符字符串，
+// 仅影响发送给客户端的展示内容，不修改内部 textBuf。
+// 注意：若占位符恰好被拆成两个 chunk，当次无法过滤（可接受，概率极低）。
+func stripInjectedPlaceholders(chunk string) string {
+	chunk = strings.ReplaceAll(chunk, `{"ok":true}`, "")
+	chunk = strings.ReplaceAll(chunk, `{"ok": true}`, "")
+	return chunk
+}
+
+// incompleteActionRe 匹配"让我…：" / "我看看…：" 等行动意图模式。
+// 用正则而非 HasSuffix，是因为冒号可能出现在文本中间而非末尾，
+// 例如："确认执行。让我分析他的提交类型分布：" 中冒号在句中。
+// [^。！？\n]{0,80} 限制匹配长度，避免跨越句子边界的误命中。
+// 覆盖的意图短语（模型声明"我打算/正在做某事"）：
+//
+//	让我 我来 我看看 我查查 我查一下 我瞧瞧
+//	我试试 我试一下 我检查 我分析 我执行
+//	我帮你 我帮您 帮你 帮您
+//	正在 开始执行 马上 现在就 我去
+var incompleteActionRe = regexp.MustCompile(
+	`(让我|我来|我看看|我查查|我查一下|我瞧瞧|我试试|我试一下|我检查|我分析|我执行|我帮你|我帮您|帮你|帮您|正在|开始执行|马上|现在就|我去)[^。！？\n]{0,80}[：:]`,
+)
+
+// isIncompleteResponse 判断模型是否输出了"准备做某事"的意图文字但忘记调用工具。
+// 典型场景：reasoning 模型说 "确认执行。让我分析...：" 后 tool_calls 为空，loop 不应就此结束。
+// 触发条件（任一）：
+//   - 文本以 `：` / `:` 结尾：模型在"设置"将要执行的内容，但话没说完
+//   - 文本以 `…` / `...` 结尾：明显未完成
+//   - 匹配 incompleteActionRe：文本任意位置含"让我/我看看/我查查…：" 等行动意图模式
+//   - 文本中包含 exec_run / pending_id / session_id 等工具 ID 关键词但没有 tool call
+func isIncompleteResponse(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if strings.HasSuffix(t, "：") || strings.HasSuffix(t, ":") {
+		return true
+	}
+	if strings.HasSuffix(t, "...") || strings.HasSuffix(t, "…") {
+		return true
+	}
+	// incompleteActionRe 仅对短文本生效：长文本（>200字符）说明模型已产出实质内容，
+	// 即使文本中间含有"让我...："也不应被误判为未完成。
+	if len([]rune(t)) <= 200 && incompleteActionRe.MatchString(t) {
+		return true
+	}
+	for _, kw := range []string{"exec_run", "pending_id", "session_id"} {
+		if strings.Contains(t, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripThinkPrefix 去除 reasoning 模型（如 Kimi K2.5）输出的思考链前缀。
+// 这类模型会先输出思考过程，以 </think> 结束，然后输出真正的回答。
+// 若文本中包含 </think>，则只保留其后的内容（去掉首尾空白）。
+// 若不含 </think>，原样返回，不影响普通模型。
+func stripThinkPrefix(s string) string {
+	if idx := strings.Index(s, "</think>"); idx >= 0 {
+		return strings.TrimSpace(s[idx+len("</think>"):])
+	}
+	return s
+}
+
 // isMimickedPlaceholder 判断 LLM 输出是否为从历史消息中学到的占位符模仿。
 // 这类输出不是真正的回答，不应结束 agent loop。
 func isMimickedPlaceholder(text string) bool {
 	t := strings.TrimSpace(text)
 	switch t {
 	case "...", "[ok]", "…", "(continued)", "OK", "ok", "[no result]",
-		`{"ok":true}`, `{"ok": true}`: // Execute 兜底注入的空工具结果格式
+		`{"ok":true}`, `{"ok": true}`, // Execute 兜底注入的空工具结果格式
+		`{"_":"t"}`: // flattenHistoryToolCalls 纯工具调用轮的 assistant 占位
 		return true
 	}
 	// 纯标点/省略号组合
@@ -1189,6 +1372,13 @@ func isMimickedPlaceholder(text string) bool {
 	// exec 空输出注入格式：[exec:exit=N]，N 为任意数字
 	if strings.HasPrefix(t, "[exec:exit=") && strings.HasSuffix(t, "]") {
 		return true
+	}
+	// LLM 将占位符追加为文本后缀（如 "好嘞，让我查一下：{"ok":true}"）。
+	// 此时 LLM 意图调用工具但未真正调用，应触发重试。
+	for _, suffix := range []string{`{"ok":true}`, `{"ok": true}`, `{"_":"t"}`} {
+		if strings.HasSuffix(t, suffix) {
+			return true
+		}
 	}
 	return false
 }
@@ -1204,6 +1394,36 @@ func isTransientErr(err error) bool {
 		strings.Contains(s, "broken pipe") ||
 		strings.Contains(s, "connection refused") ||
 		strings.Contains(s, "TLS handshake timeout")
+}
+
+// is429Err 判断是否为 API 限速错误（HTTP 429 / RATE_LIMIT_EXCEEDED）。
+func is429Err(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "429") || strings.Contains(s, "RATE_LIMIT")
+}
+
+// friendlyLLMErr 将 LLM API 错误转换为对用户友好的中文提示，不暴露原始 API 错误细节。
+func friendlyLLMErr(err error) string {
+	if err == nil {
+		return "AI 服务请求失败，请重试"
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "429") || strings.Contains(s, "RATE_LIMIT"):
+		return "AI 服务当前访问人数过多，重试后仍失败，请稍后再试"
+	case strings.Contains(s, "401") || strings.Contains(s, "403"):
+		return "AI 服务鉴权失败，请联系管理员"
+	case strings.Contains(s, "500") || strings.Contains(s, "502") ||
+		strings.Contains(s, "503") || strings.Contains(s, "504"):
+		return "AI 服务暂时不可用，请稍后再试"
+	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline"):
+		return "AI 服务响应超时，请重试"
+	default:
+		return "AI 服务请求失败，请重试"
+	}
 }
 
 // hasInteractiveTool 判断本轮 tool_calls 中是否包含需要等待用户交互的工具。
@@ -1406,16 +1626,16 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 			// assistant 消息：仅保留原始文本，不附加任何工具名称标注。
 			// 若附加"[调用工具: xxx]"，LLM 会学习并在后续回复中模仿输出该文本，
 			// 导致真正的工具调用被文字替代（与工具名无关，只要看起来像"我要调用工具"就会被模仿）。
-			// 若原文为空（纯工具调用轮），用 "[ok]" 占位维持角色交替。
-			// 不可用 "..."——LLM 会从历史中学习并在后续轮直接输出 "..." 作为完整回答导致异常结束。
+			// 若原文为空（纯工具调用轮），不注入任何占位符——直接跳过 assistant 消息。
+			// 随后的工具结果 user 消息会与前一条 user 消息在第二遍合并，满足角色交替要求，
+			// 且不向 LLM 展示任何可被学习模仿的占位符文本。
 			assistantContent := strings.TrimSpace(m.Content)
-			if assistantContent == "" {
-				assistantContent = "[no result]"
+			if assistantContent != "" {
+				raw = append(raw, llm.ChatMessage{
+					Role:    "assistant",
+					Content: assistantContent,
+				})
 			}
-			raw = append(raw, llm.ChatMessage{
-				Role:    "assistant",
-				Content: assistantContent,
-			})
 			// 建立 ToolCallID → Content 映射
 			toolContents := make(map[string]string, j-i-1)
 			for k := i + 1; k < j; k++ {
