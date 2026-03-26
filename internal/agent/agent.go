@@ -2059,9 +2059,38 @@ func stripToolCallContentSelective(calls []llm.ToolCall, results []string) []llm
 
 // ----- 长期记忆辅助 -----
 
-const memoryFlushPrompt = "[System: Session ending. Use the available tools to save anything worth keeping — user preferences, corrections, env facts, notable conclusions. If nothing worth saving, skip.]"
+// buildMemoryContextBlock 读取当前 notes 和 persona，格式化为供 flush/review prompt 使用的文本块。
+// LLM 可直接复制其中条目作为 old_text，避免因使用系统提示中的过期快照导致 exact-match 失败。
+func buildMemoryContextBlock(userID string) string {
+	notes, _ := storage.GetUserNotes(userID)
+	persona := ""
+	if p, _ := storage.GetUserProfile(userID); p != nil {
+		persona = p.Persona
+	}
+	var sb strings.Builder
+	sb.WriteString("Current memory state (copy entries verbatim when using old_text):\n")
+	if notes != "" {
+		sb.WriteString("  notes: " + notes + "\n")
+	} else {
+		sb.WriteString("  notes: (empty)\n")
+	}
+	if persona != "" {
+		sb.WriteString("  persona: " + persona + "\n")
+	} else {
+		sb.WriteString("  persona: (empty)\n")
+	}
+	return sb.String()
+}
 
-const memoryReviewPrompt = "[System: Review the conversation. If you found user preferences, env facts, or stable conventions worth keeping, call the memory tool to save them. If nothing, reply SKIP.]"
+func buildFlushPrompt(userID string) string {
+	return "[System: Session ending.\n" + buildMemoryContextBlock(userID) +
+		"Use the available tools to save anything worth keeping — user preferences, corrections, env facts, notable conclusions. If nothing worth saving, skip.]"
+}
+
+func buildReviewPrompt(userID string) string {
+	return "[System: Review the conversation.\n" + buildMemoryContextBlock(userID) +
+		"If you found user preferences, env facts, or stable conventions worth keeping, call the memory tool to save them. If nothing, reply SKIP.]"
+}
 
 // flushSessionMemory 提示 LLM 保存本次会话中有价值的信息。
 // - 压缩前调用：同步执行（调用方传入带 timeout 的 ctx），阻塞直至完成或超时。
@@ -2070,7 +2099,7 @@ const memoryReviewPrompt = "[System: Review the conversation. If you found user 
 // 不写 DB 对话历史，不影响正常会话上下文。
 func (a *Agent) flushSessionMemory(ctx context.Context, userID, sessionID string, messages []llm.ChatMessage) {
 	flushMessages := append(append([]llm.ChatMessage(nil), messages...),
-		llm.ChatMessage{Role: "user", Content: memoryFlushPrompt})
+		llm.ChatMessage{Role: "user", Content: buildFlushPrompt(userID)})
 
 	flushTools := []llm.Tool{tool.MemoryTool()}
 	if a.honchoClient != nil {
@@ -2139,7 +2168,7 @@ func (a *Agent) maybeReviewMemory(userID string, messages []llm.ChatMessage) {
 
 	logger.Debug("agent", userID, "", fmt.Sprintf("[memory-review] triggered at turn %d, msgs=%d", current, len(messages)), 0)
 	snapshot := append([]llm.ChatMessage(nil), messages...) // 独立副本，避免并发修改
-	reviewMessages := append(snapshot, llm.ChatMessage{Role: "user", Content: memoryReviewPrompt})
+	reviewMessages := append(snapshot, llm.ChatMessage{Role: "user", Content: buildReviewPrompt(userID)})
 	memTool := tool.MemoryTool()
 	eventCh, err := a.llmClient.ChatStream(a.bgCtx, reviewMessages, []llm.Tool{memTool})
 	if err != nil {

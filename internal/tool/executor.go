@@ -7,24 +7,23 @@
 //
 // 内置工具（合并后）：
 //   - read_image        : 按需读取图片并返回多模态内容（本轮 in-memory，不写 DB）
-//   - notify            : UI 通知统一入口（action=progress/options/confirm，合并自 send_progress/send_options/send_confirm）
-//                         progress 纯 UI，不写 DB；options/confirm 写 DB，下轮上下文可见
+//   - notify            : UI 通知统一入口（action=progress/options/confirm/upload，合并自 send_progress/send_options/send_confirm/send_file_upload）
+//     progress/upload 纯 UI，不写 DB；options/confirm 写 DB，下轮上下文可见
 //   - skill             : 技能操作统一入口（action=load/run_script/read_asset/read_reference/write/reload，合并自 get_skill_content/run_script/read_asset/write_skill_file/reload_skills）
 //   - kv                : 会话 KV 统一入口（action=get/set/append，合并自 kv_get/kv_set/kv_append）
 //   - fs                : 文件系统统一入口（action=list/stat/read/write/delete/move/mkdir，合并自 7 个 fs_* 工具）
 //   - tool_request      : 工具需求统一入口（action=request/list/close，合并自 3 个工具）
 //   - output_file       : 文件输出统一入口（action=write/download，合并自 write_output_file/serve_file_download）
-//                         write 写文件后自动生成下载 token，一次调用返回 path+download_url
+//     write 写文件后自动生成下载 token，一次调用返回 path+download_url
 //   - feishu            : 飞书操作统一入口（action=send/webhook/get_config/set_config，合并自 4 个工具）
 //   - wecom             : 企业微信统一入口（action=send/get_config/set_config，合并自 3 个工具）
-//   - user_persona      : 用户人设统一入口（action=get/set，合并自 2 个工具）
 //   - mcp               : MCP 外接能力统一入口（action=list/detail/call，通过 internal/mcp/registry.go 懒加载）
 //
 // 依赖注入策略：
 //   - ProgressSender    通过 context.Value 注入，供 send_progress 使用
 //   - InteractiveSender 通过 context.Value 注入，供 send_options / send_confirm 使用
 //   - sessionID         通过 context.Value 注入，供 kv 工具访问数据库
-//   均在 agent.Run() 启动时设置，tool 包不直接依赖 agent/handler 包。
+//     均在 agent.Run() 启动时设置，tool 包不直接依赖 agent/handler 包。
 package tool
 
 import (
@@ -161,27 +160,25 @@ type Executor struct {
 // New 创建并注册所有内置工具
 func New() *Executor {
 	e := &Executor{handlers: make(map[string]Handler)}
-	e.register("notify", handleNotify)                   // 合并自 send_progress / send_options / send_confirm
-	e.register("skill", e.handleSkill)                   // 合并自 get_skill_content / run_script / read_asset / write_skill_file / reload_skills
-	e.register("kv", handleKv)                          // 合并自 kv_get / kv_set / kv_append
+	e.register("notify", handleNotify) // 合并自 send_progress / send_options / send_confirm
+	e.register("skill", e.handleSkill) // 合并自 get_skill_content / run_script / read_asset / write_skill_file / reload_skills
+	e.register("kv", handleKv)         // 合并自 kv_get / kv_set / kv_append
 	e.register("update_role_md", handleUpdateRoleMD)
 	e.register("get_current_user", handleGetCurrentUser)
 	e.register("read_file", handleReadFile)
-	e.register("fs", handleFs)                           // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
-	e.register("tool_request", e.handleToolRequest)      // 合并自 request_tool / list_tool_requests / close_tool_request
-	e.register("output_file", handleOutputFile) // 合并自 write_output_file / serve_file_download
-	e.register("send_file_upload", handleSendFileUpload)
+	e.register("fs", handleFs)                      // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
+	e.register("tool_request", e.handleToolRequest) // 合并自 request_tool / list_tool_requests / close_tool_request
+	e.register("output_file", handleOutputFile)     // 合并自 write_output_file / serve_file_download
 	e.register("exec", handleExec)
 	e.register("exec_run", handleExecRun)
 	e.register("process", handleProcess)
-	e.register("feishu", handleFeishu)                   // 合并自 feishu_send / feishu_webhook / get_feishu_config / set_feishu_config
-	e.register("wecom", handleWecom)                     // 合并自 wecom_send / get_wecom_config / set_wecom_config
+	e.register("feishu", handleFeishu) // 合并自 feishu_send / feishu_webhook / get_feishu_config / set_feishu_config
+	e.register("wecom", handleWecom)   // 合并自 wecom_send / get_wecom_config / set_wecom_config
 	e.register("browser", handleBrowser)
 	e.register("web_fetch", handleWebFetch)
 	e.register("read_pdf", handleReadPDF)
 	e.register("code_search", handleCodeSearch)
 	e.register("cron", handleCron)
-	e.register("user_persona", handleUserPersona)        // 合并自 get_user_persona / set_user_persona
 	e.register("nano_banana", handleNanoBanana)
 	e.register("get_tool_doc", handleGetToolDoc)
 	e.register("read_image", handleReadImage)
@@ -241,13 +238,14 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "notify",
-				Description: "UI notification. action: progress (push message, no wait) / options (show choice buttons, STOP and wait for reply) / confirm (show confirm dialog, STOP and wait for reply).",
+				Description: "UI notification. action: progress (push message, no wait) / options (show choice buttons, STOP and wait for reply) / confirm (show confirm dialog, STOP and wait for reply) / upload (show file upload widget, STOP and wait for reply; next turn contains uploaded path or \"skip\").",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"action":  map[string]any{"type": "string", "enum": []string{"progress", "options", "confirm"}},
+						"action":  map[string]any{"type": "string", "enum": []string{"progress", "options", "confirm", "upload"}},
 						"message": map[string]any{"type": "string", "description": "progress: text; confirm: action description"},
-						"title":   map[string]any{"type": "string", "description": "options: title shown above the buttons"},
+						"title":   map[string]any{"type": "string", "description": "options: title above buttons; upload: widget title"},
+						"prompt":  map[string]any{"type": "string", "description": "upload: additional description shown to user"},
 						"options": map[string]any{
 							"type": "array",
 							"items": map[string]any{
@@ -414,23 +412,8 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Description: "Manage exec background processes (list/poll/log/write/submit/kill etc.). Many parameters — call get_tool_doc(\"process\") first for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "send_file_upload",
-				Description: "Show an image upload widget to the user. Stop after calling; retrieve the uploaded path or \"skip\" in the next turn.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"title":  map[string]any{"type": "string", "description": "Upload widget title"},
-						"prompt": map[string]any{"type": "string", "description": "Additional description"},
-					},
-					"required": []string{"title"},
 				},
 			},
 		},
@@ -458,7 +441,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Description: "Feishu operations. action: send (Bot API, receive_id=\"self\" for bound user) / webhook (group Webhook, no credentials) / get_config (read config) / set_config (write App ID/Secret/Webhook/open_id). Call get_tool_doc(\"feishu\") for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
 				},
 			},
@@ -483,11 +466,11 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "browser",
+				Name:        "browser",
 				Description: "Headless Chromium browser automation. MUST call get_tool_doc(\"browser\") before use for full params and login-handling protocol. Key rules: (1) snapshot=read page content, NEVER screenshot for that; (2) if login/verification detected, do NOT screenshot — use notify(options) to ask if server runs locally; if yes: close → launch(visible=true) → navigate to login page → wait for user → close visible browser → launch() headless → navigate to task URL → continue task. CRITICAL: visible browser is for login ONLY — never perform task work in it; always close and relaunch headless before continuing. visible=true only valid on launch.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
 				},
 			},
@@ -495,7 +478,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "web_fetch",
+				Name:        "web_fetch",
 				Description: "Fetch URL content via HTTP GET, returning Markdown/JSON/plain text. 5-minute cache. Prefer for static pages; use browser when JS rendering is needed.",
 				Parameters: map[string]any{
 					"type": "object",
@@ -516,7 +499,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "read_pdf",
+				Name:        "read_pdf",
 				Description: "Extract PDF text page by page. Supports page range (pages=\"1-5\") and image rendering (render=true for scanned documents).",
 				Parameters: map[string]any{
 					"type": "object",
@@ -545,7 +528,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Description: "Explore codebase (tree for directory listing / grep for content search). Call get_tool_doc(\"code_search\") first for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
 				},
 			},
@@ -557,23 +540,8 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Description: "Manage scheduled tasks (add/list/update/remove/run/status). The schedule field is complex — call get_tool_doc(\"cron\") first for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "user_persona",
-				Description: "Get or set user persona (name, language, style). action: get / set.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"action":  map[string]any{"type": "string", "enum": []string{"get", "set"}},
-						"persona": map[string]any{"type": "string", "description": "Required for set"},
-					},
-					"required": []string{"action"},
 				},
 			},
 		},
@@ -584,7 +552,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Description: "Generate images using the nano-banana-pro model (txt2img/img2img/edit). Call get_tool_doc(\"nano_banana\") first for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
-					"properties":          map[string]any{},
+					"properties":           map[string]any{},
 					"additionalProperties": true,
 				},
 			},
@@ -609,7 +577,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "read_image",
+				Name:        "read_image",
 				Description: "View an image for visual analysis. History images stored as [file: path]; find path before calling.",
 				Parameters: map[string]any{
 					"type": "object",
@@ -661,7 +629,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		all = append(all, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name: "session_search",
+				Name:        "session_search",
 				Description: "Search past sessions (with query: FTS + AI summary, limit 1-5) or list recent sessions (no query: metadata only, limit 1-10). Use for context from earlier conversations only.",
 				Parameters: map[string]any{
 					"type": "object",
@@ -685,7 +653,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 	}
 	// initialized=true 后，过滤掉仅在 bootstrap 阶段使用的工具
 	if cfg, err := storage.GetAppConfig(); err == nil && cfg.Initialized {
-		bootstrapOnly := map[string]bool{"update_role_md": true, "send_file_upload": true}
+		bootstrapOnly := map[string]bool{"update_role_md": true}
 		filtered := make([]llm.Tool, 0, len(all))
 		for _, t := range all {
 			if !bootstrapOnly[t.Function.Name] {
@@ -780,8 +748,8 @@ func handleSendConfirm(ctx context.Context, argsJSON string) (string, error) {
 	return "ok", nil
 }
 
-// handleNotify 通过 action 字段分发，替代 send_progress / send_options / send_confirm 三个工具。
-// action: progress / options / confirm
+// handleNotify 通过 action 字段分发，替代 send_progress / send_options / send_confirm / send_file_upload 四个工具。
+// action: progress / options / confirm / upload
 func handleNotify(ctx context.Context, argsJSON string) (string, error) {
 	var base struct {
 		Action string `json:"action"`
@@ -796,8 +764,10 @@ func handleNotify(ctx context.Context, argsJSON string) (string, error) {
 		return handleSendOptions(ctx, argsJSON)
 	case "confirm":
 		return handleSendConfirm(ctx, argsJSON)
+	case "upload":
+		return handleSendFileUpload(ctx, argsJSON)
 	default:
-		return "", fmt.Errorf("unknown notify action: %q (valid: progress/options/confirm)", base.Action)
+		return "", fmt.Errorf("unknown notify action: %q (valid: progress/options/confirm/upload)", base.Action)
 	}
 }
 
@@ -809,7 +779,7 @@ func handleSendFileUpload(ctx context.Context, argsJSON string) (string, error) 
 		Prompt string `json:"prompt"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("parse send_file_upload args: %w", err)
+		return "", fmt.Errorf("parse notify upload args: %w", err)
 	}
 	if args.Title == "" {
 		args.Title = "上传图片"
@@ -823,7 +793,6 @@ func handleSendFileUpload(ctx context.Context, argsJSON string) (string, error) 
 	}
 	return "ok", nil
 }
-
 
 // handleGetSkillContent 读取指定 skill_id 的完整内容，并向前端推送技能的优雅名称。
 func handleGetSkillContent(ctx context.Context, argsJSON string) (string, error) {
@@ -1240,10 +1209,10 @@ func resolveSkillBaseDir(userID string) string {
 //   - skill_id: 技能唯一标识，只允许小写字母、数字、下划线
 //   - content: 文件内容
 //   - sub_path（可选）: 相对于技能根目录的路径：
-//     - 省略 → 写入 SKILL.md（默认行为）
-//     - "script/foo.sh"       → 写入 script/ 目录
-//     - "assets/bar.json"     → 写入 assets/ 目录（资产文件）
-//     - "references/baz.md"   → 写入 references/ 目录（参考文件）
+//   - 省略 → 写入 SKILL.md（默认行为）
+//   - "script/foo.sh"       → 写入 script/ 目录
+//   - "assets/bar.json"     → 写入 assets/ 目录（资产文件）
+//   - "references/baz.md"   → 写入 references/ 目录（参考文件）
 //
 // 安全约束：
 //   - skill_id 只允许小写字母、数字、下划线（防止路径注入）
@@ -1562,7 +1531,7 @@ func handleUpdateRoleMD(ctx context.Context, argsJSON string) (string, error) {
 
 	// 初始化完成后 ROLE.md 锁定，禁止通过工具覆盖
 	if cfg, err := storage.GetAppConfig(); err == nil && cfg.Initialized {
-		return "", fmt.Errorf("系统已完成初始化，ROLE.md 已锁定，无法通过工具修改（如需重置，请联系管理员手动修改 config/app.json）")
+		return "", fmt.Errorf("系统已完成初始化，无法通过工具修改（如需重置，请联系管理员手动修改）")
 	}
 
 	// 可选：同步写入头像 URL（失败不阻断主流程）
@@ -1580,13 +1549,13 @@ func handleUpdateRoleMD(ctx context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("role updater not available in context")
 	}
 	if err := updater(args.Content); err != nil {
-		return "", fmt.Errorf("update ROLE.md: %w", err)
+		return "", fmt.Errorf("更新系统角色信息失败: %w", err)
 	}
 	// 仅在 bootstrap 最后一步（finalize=true）时锁定初始化入口，确保所有系统技能均已创建完毕
 	if args.Finalize {
 		_ = storage.MarkInitialized()
 	}
-	return "ROLE.md 已写入并热加载，新角色从下一轮对话起生效", nil
+	return "系统角色信息已写入并热加载，新角色从下一轮对话起正式生效", nil
 }
 
 // handleGetCurrentUser 返回当前登录用户的 user_id。

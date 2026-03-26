@@ -88,9 +88,9 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 		args.Action, args.Target, len([]rune(args.Content)), len([]rune(args.OldText))), 0)
 
 	switch args.Action {
-	case "add", "replace", "remove":
+	case "get", "add", "replace", "remove":
 	default:
-		return memoryError("unknown action: " + args.Action + " (valid: add/replace/remove)"), nil
+		return memoryError("unknown action: " + args.Action + " (valid: get/add/replace/remove)"), nil
 	}
 	switch args.Target {
 	case "notes", "persona":
@@ -125,6 +125,18 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 		}
 		charLimit = config.Cfg.MemoryPersonaCharLimit
 		logger.Debug("tool", userID, "", fmt.Sprintf("[memory] read persona: %d chars (limit %d)", len([]rune(current)), charLimit), 0)
+	}
+
+	// get 操作：直接返回当前值，无需修改
+	if args.Action == "get" {
+		b, _ := json.Marshal(map[string]any{
+			"ok":          true,
+			"target":      args.Target,
+			"value":       current,
+			"chars_used":  len([]rune(current)),
+			"chars_limit": charLimit,
+		})
+		return string(b), nil
 	}
 
 	// 应用操作
@@ -272,7 +284,7 @@ At char limit, replace/remove stale entries first.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"action":   map[string]any{"type": "string", "description": "add | replace | remove"},
+					"action":   map[string]any{"type": "string", "description": "get | add | replace | remove"},
 					"target":   map[string]any{"type": "string", "description": "notes | persona"},
 					"content":  map[string]any{"type": "string", "description": "New content (required for add/replace)"},
 					"old_text": map[string]any{"type": "string", "description": "Exact entry text to replace or remove (required for replace/remove)"},

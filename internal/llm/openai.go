@@ -137,23 +137,56 @@ func newOpenAIClient() *openAIClient {
 	return newOpenAIClientFromEndpoint(config.Cfg.LLMEndpoints[0])
 }
 
-// ChatSync 发起非流式请求，阻塞直到收到完整文本回复
+// openAIFullResponse 非流式 Chat Completions 响应体
+type openAIFullResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+// ChatSync 发起非流式请求（stream=false），阻塞直到收到完整文本回复。
+// 不使用 ChatStream，避免部分代理对 stream=true 请求内部处理失败（500 "expected stream response"）。
 func (c *openAIClient) ChatSync(ctx context.Context, messages []ChatMessage) (string, error) {
-	eventCh, err := c.ChatStream(ctx, messages, nil)
+	req := openAIRequest{
+		Model:    c.model,
+		Messages: toOpenAIMessages(messages),
+		Stream:   false,
+	}
+	if c.maxTokens > 0 {
+		req.MaxTokens = c.maxTokens
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal request: %w", err)
 	}
-	var buf strings.Builder
-	for ev := range eventCh {
-		if ev.Error != nil {
-			return "", ev.Error
-		}
-		if ev.Done {
-			break
-		}
-		buf.WriteString(ev.TextChunk)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build http request: %w", err)
 	}
-	return buf.String(), nil
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("llm api error %d: %s", resp.StatusCode, string(b))
+	}
+	var full openAIFullResponse
+	if err := json.Unmarshal(b, &full); err != nil {
+		return "", fmt.Errorf("parse sync response: %w", err)
+	}
+	if len(full.Choices) == 0 {
+		return "", fmt.Errorf("empty choices in sync response")
+	}
+	return full.Choices[0].Message.Content, nil
 }
 
 // ChatStream 发起流式请求，返回事件 channel。
