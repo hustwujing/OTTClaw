@@ -8,6 +8,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -237,6 +238,8 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	hasCompressed := false // 每次 Run() 只允许压缩一次，防止「压缩 → 工具执行 → 再次超限 → 再压缩」循环
 	hasFlushed := false    // Fix 1: 防止压缩前 flush 与会话结束 flush 重复触发
 	toolCallIters := 0     // 有工具调用的迭代轮次数，用于判断是否触发自我进化技能生成
+	tmp := llm.ChatMessage{Role: "user", Content: logUserInput(userInput)}
+	newestUsrMsg, _ := json.Marshal(tmp)
 	for iter := 0; iter < maxIterations; iter++ {
 		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
 		if !hasCompressed {
@@ -282,7 +285,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}
 		}
 		if iter == 0 {
-			logger.Info("llm", userID, sessionID, ">>> "+logUserInput(userInput), 0)
+			logger.Info("llm", userID, sessionID, ">>> "+string(newestUsrMsg), 0)
+		} else {
+			logger.Info("llm", userID, sessionID, ">>>> "+string(newestUsrMsg), 0)
 		}
 		logger.Debug("llm", userID, sessionID,
 			fmt.Sprintf("llm call iter=%d model=%s msgs=%d est_tokens=%d",
@@ -381,9 +386,6 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			return streamErr
 		}
 
-		if replyText := textBuf.String(); replyText != "" {
-			logger.Info("llm", userID, sessionID, "<<< "+truncate(replyText, 1024), 0)
-		}
 		logger.Debug("llm", userID, sessionID,
 			fmt.Sprintf("llm call done iter=%d tool_calls=%d cost=%dms",
 				iter, len(toolCalls), time.Since(iterStart).Milliseconds()), 0)
@@ -394,7 +396,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			"tool_calls": toolCalls,
 		}); err == nil {
 			logger.DebugData("llm", userID, sessionID,
-				fmt.Sprintf("llm output iter=%d", iter), data, time.Since(iterStart))
+				fmt.Sprintf("<<<< llm output iter=%d", iter), data, time.Since(iterStart))
 		}
 
 		// 情况 A：无工具调用 → 普通回答，保存并结束循环
@@ -413,6 +415,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					fmt.Sprintf("LLM output mimicked placeholder %q at iter=%d, retrying", assistantText, iter), 0)
 				messages = append(messages, llm.ChatMessage{Role: "assistant", Content: assistantText})
 				messages = append(messages, llm.ChatMessage{Role: "user", Content: "请继续完成任务，不要只回复占位符。"})
+				tmp1, _ := json.Marshal(messages[len(messages)-2])
+				tmp2, _ := json.Marshal(messages[len(messages)-1])
+				newestUsrMsg = []byte(fmt.Sprintf("%s\t%s", string(tmp1), string(tmp2)))
 				continue
 			}
 			if err := storage.AddMessage(userID, sessionID, "assistant", assistantText, "", "", ""); err != nil {
@@ -504,6 +509,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		})
 
 		// 执行每个工具调用
+		newestUsrMsg = []byte("") // 供循环内闭包使用，避免迭代变量被覆盖
 		for _, tc := range toolCalls {
 			toolStart := time.Now()
 			logger.Debug("tool", userID, sessionID,
@@ -523,6 +529,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			toolMsg, dbContent := a.processToolResult(userID, sessionID, writer, tc, result)
 			// in-memory：所有工具结果都追加（本轮 LLM API 要求每个 tool_call 有对应 tool 回复）
 			messages = append(messages, toolMsg)
+			newestUsrMsg = []byte(fmt.Sprintf("%s\t%s", newestUsrMsg, toolMsg))
 
 			// notify(action=progress) 是纯 UI 通知，不写 DB，不计入日志统计
 			// notify(action=options/confirm) 需写 DB（见上方 "DB 保存 assistant 消息" 注释）
@@ -533,6 +540,8 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			// 有语义的工具：写 DB + 记录详细日志 + 推送完成事件
 			a.persistToolResult(userID, sessionID, writer, tc, dbContent, toolErr, toolStart, start, &pendingCalls)
 		}
+		newestUsrMsg = bytes.TrimSpace(newestUsrMsg)
+
 		// 若本轮包含交互工具（notify action=options/confirm），立即结束循环。
 		// LLM 已通过交互工具表达了"等待用户决策"的意图，
 		// 继续调用 LLM 只会产生多余输出，且无法保证模型不再调用更多工具。
