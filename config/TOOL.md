@@ -129,53 +129,123 @@ Slider CAPTCHA: ask user for session cookie.
 
 ## code_search
 
-**Purpose**: Efficiently explore a codebase, providing two operations: recursive directory tree and keyword/regex search. An LLM can grasp project structure or locate target code in 1-2 calls, replacing the inefficient pattern of repeatedly calling `fs_list` + `fs_read`.
+**Purpose**: Explore codebase and docs. 8 actions covering all code analysis needs — always prefer these over `fs` or `exec` for reading/searching source files.
 
-**Parameters**:
-- `action` (string, required): `"tree"` or `"grep"`
-- `path` (string, required): Target directory path
+**Common parameters**:
+- `action` (string, required): one of `tree / grep / glob / outline / chunk_read / git / ast_grep / comby`
+- `path` (string, required): target file or directory
 
-**action: "tree"** — Recursively list the directory tree
-- `max_depth` (int, optional): Maximum recursion depth; default 5
-- `include` (string, optional): Filename glob filter, e.g. `"*.go"` (matches filenames only)
-
-Returns the directory tree in indented text format, e.g.:
-```
-my-project/
-  main.go
-  internal/
-    tool/
-      executor.go
-```
-Automatically skips noise directories: `.git`, `node_modules`, `vendor`, `__pycache__`, `.venv`, `.idea`, `.vscode`, `bin`, `dist`, `build`, `.next`. Returns at most 500 entries; truncated with a notice if exceeded.
-
-**action: "grep"** — Recursively search file content
-- `pattern` (string, required): Search keyword or regular expression
-- `include` (string, optional): Filename glob filter, e.g. `"*.go"`
-- `max_results` (int, optional): Maximum number of matches to return; default 50
-- `context_lines` (int, optional): Number of context lines to show before and after each match; default 2
-
-Return format (`>` marks the matching line; others are context):
-```
-> internal/tool/executor.go:194: e.register("code_search", handleCodeSearch)
-  internal/tool/executor.go:195: return e
 ---
-  internal/agent/agent.go:186: // Start agent
-> internal/agent/agent.go:187: maxIterations := config.Cfg.AgentMaxIterations
-  internal/agent/agent.go:188: for i := 0; i < maxIterations; i++ {
-```
-Automatically skips binary files (NUL byte detection), noise directories (same as tree), and files larger than 1 MB.
 
-**Typical usage**:
+**action: "tree"** — Recursively list directory structure
+- `max_depth` (int, optional): recursion depth, default 5
+- `include` (string, optional): filename glob filter, e.g. `"*.go"`
+
+Use when: getting an overview of project layout.
 ```
-// Understand project structure
 code_search(action="tree", path="internal/")
+```
 
-// Search for tool registration points
-code_search(action="grep", path="internal/", pattern="e\\.register\\(", include="*.go")
+---
 
-// Find a function definition
+**action: "grep"** — Regex search across file contents
+- `pattern` (string, required): regex, e.g. `"func handleExec"`
+- `include` (string, optional): filename filter, e.g. `"*.go"`
+- `max_results` (int, optional): default 50
+- `context_lines` (int, optional): lines before/after each match, default 2
+
+Use when: finding where a symbol/string is defined or used.
+```
 code_search(action="grep", path=".", pattern="func handleExec", include="*.go")
+code_search(action="grep", path=".", pattern="e\\.register\\(", include="*.go")
+```
+
+---
+
+**action: "glob"** — Find files by name pattern (supports `**`)
+- `pattern` (string, required): glob pattern, e.g. `"**/*.go"`, `"internal/**/*_test.go"`
+- `max_results` (int, optional): default 300
+
+Use when: locating files by naming convention, e.g. all test files, all config files.
+```
+code_search(action="glob", path=".", pattern="**/*_test.go")
+code_search(action="glob", path=".", pattern="internal/tool/*.go")
+```
+
+---
+
+**action: "outline"** — Extract symbol structure without reading full file
+- `path`: file or directory
+- `include` (string, optional): filename filter when path is a directory
+
+Supports: Go (func/struct/interface/type), Python (def/class), TS/JS (function/class/interface/type), Rust (fn/struct/enum/trait/impl), Java (class/interface/method), Markdown (headings). Returns line numbers for all symbols.
+
+Use when: understanding a file's structure before deciding which section to read; finding which function is at a given line range.
+```
+code_search(action="outline", path="internal/agent/agent.go")
+code_search(action="outline", path="internal/tool/")
+```
+
+---
+
+**action: "chunk_read"** — Read large files in sections with line numbers
+- `chunk` (int, optional): which chunk to read, 1-based, default 1
+- `chunk_size` (int, optional): lines per chunk, default 80
+
+Result header: `[chunk N/M | lines X-Y of Z | filename]`. If more chunks remain, the result ends with `[K chunks remaining — call chunk_read with chunk=N+1 to continue reading]`. **Keep calling with chunk=2, 3, … until you see `[end of file]`**.
+
+Use when: reading a large file section by section (use `outline` first to find the target line range, then jump to the right chunk).
+```
+code_search(action="chunk_read", path="internal/agent/agent.go", chunk=1)
+code_search(action="chunk_read", path="internal/agent/agent.go", chunk=3, chunk_size=120)
+```
+
+---
+
+**action: "git"** — Read-only git history operations
+- `git_action` (string, required): `log | blame | diff | show | status | branch | tag`
+- `revision` (string, optional): commit ref / range (for diff/show/blame/log)
+- `pattern` (string, optional): file path (blame/diff) or `--grep` keyword (log)
+- `n` (int, optional): max entries for log, default 20
+
+Use when: understanding code history, finding who changed a line, seeing what changed in a commit.
+```
+code_search(action="git", path=".", git_action="log", n=10)
+code_search(action="git", path=".", git_action="blame", pattern="internal/agent/agent.go")
+code_search(action="git", path=".", git_action="diff", revision="HEAD~1")
+code_search(action="git", path=".", git_action="show", revision="abc1234")
+```
+
+---
+
+**action: "ast_grep"** — Structural code search by AST pattern (requires `ast-grep`)
+- `pattern` (string, required): code template with `$VAR` / `$$$VARS` placeholders
+- `lang` (string, required): `go / python / js / ts / rust / java / cpp / ...`
+- `max_results` (int, optional): default 50
+- `context_lines` (int, optional): context lines around each match
+
+Matches syntax structure, not text — finds all calls regardless of formatting or argument names. Install: `brew install ast-grep` / `cargo install ast-grep`.
+
+Use when: finding all callers of a function, all error-handling patterns, all struct instantiations of a type.
+```
+code_search(action="ast_grep", path=".", pattern="fmt.Errorf($$$)", lang="go")
+code_search(action="ast_grep", path=".", pattern="if $ERR != nil { $$$BODY }", lang="go")
+code_search(action="ast_grep", path=".", pattern="useState($INIT)", lang="ts")
+```
+
+---
+
+**action: "comby"** — Delimiter-balanced template search, language-agnostic (requires `comby`)
+- `pattern` (string, required): template with `:[VAR]` placeholders; brackets/quotes auto-balanced
+- `include` (string, optional): file extension matcher, e.g. `".go"`
+- `max_results` (int, optional): default 50
+
+Unlike regex, `:[VAR]` matches any nested content including parentheses and brackets. Install: `brew install comby` / `bash <(curl -sL get.comby.dev)`.
+
+Use when: grep regex is too rigid for nested expressions; cross-language structural patterns.
+```
+code_search(action="comby", path=".", pattern="fmt.Sprintf(:[fmt], :[args])", include=".go")
+code_search(action="comby", path=".", pattern="json.Unmarshal(:[data], &:[target])", include=".go")
 ```
 
 ---

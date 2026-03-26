@@ -916,7 +916,7 @@ Universal: These rules are absolute and apply to all roles and scenarios without
 # Available Tools
 Refer to the parameter descriptions in the tool definitions for usage. If unsure, call get_tool_doc(name) to view the tool's detailed documentation.
 In conversation history, user messages prefixed with "[工具 X 结果]:" are historical tool results stored for context — do NOT output text in this format yourself; always invoke tools via the real tool-calling interface.
-For reading code or documentation files, always prefer code_search over fs: use outline to get file structure first, then chunk_read to read specific sections. Use fs.read only for config, binary, or uploaded files.
+For reading code or documentation files, always prefer code_search over fs or exec: use outline to get file structure first, then chunk_read to read specific sections. Never use exec to run cat/sed/grep/find on source files — use code_search actions instead.
 
 %s
 
@@ -1079,7 +1079,7 @@ func formatToolCall(name, argsJSON string) string {
 		}
 		parts = append(parts, k+"="+truncate(s, 64))
 	}
-	return (name + "(" + strings.Join(parts, ", ") + ")")[0:512]
+	return truncate(name+"("+strings.Join(parts, ", ")+")", 768)
 }
 
 // extractWebURL 从普通工具结果 JSON 中提取 webUrl 字段（camelCase）。
@@ -1567,12 +1567,19 @@ func (a *Agent) compressHistory(ctx context.Context, userID, sessionID string, m
 	// 构造摘要请求：让 LLM 压缩旧消息
 	// sanitizeForSummary 将 oldPart 转换为纯文本消息，避免 Anthropic 拒绝未配对的
 	// tool_use / tool_result 块（oldPart 可能在任意位置截断，导致工具调用对不齐）
-	summaryReq := make([]llm.ChatMessage, 0, len(oldPart)+1)
+	summaryReq := make([]llm.ChatMessage, 0, len(oldPart)+2)
 	summaryReq = append(summaryReq, llm.ChatMessage{
 		Role:    "system",
 		Content: "请用简洁的中文对以下对话历史进行摘要，保留关键信息、决策和结论，忽略工具调用细节。\n必须在摘要中原样保留以下信息（如有出现）：\n- 用户（user）的每一条指令和要求，尽量保留原文\n- KV key（格式如 _tool_result_xxx）\n- exec 后台进程的 session_id（格式如 es_xxx）\n- 正在操作的文件路径",
 	})
 	summaryReq = append(summaryReq, sanitizeForSummary(oldPart)...)
+	// 确保请求以 user 消息结尾（部分 LLM 拒绝 assistant prefill）
+	if len(summaryReq) == 0 || summaryReq[len(summaryReq)-1].Role != "user" {
+		summaryReq = append(summaryReq, llm.ChatMessage{
+			Role:    "user",
+			Content: "请对以上对话进行摘要。",
+		})
+	}
 
 	summaryText, err := a.llmClient.ChatSync(ctx, summaryReq)
 	if err != nil {
@@ -2069,16 +2076,33 @@ func buildMemoryContextBlock(userID string) string {
 		persona = p.Persona
 	}
 	var sb strings.Builder
-	sb.WriteString("Current memory state (copy entries verbatim when using old_text):\n")
-	if notes != "" {
-		sb.WriteString("  notes: " + notes + "\n")
+	sb.WriteString("Current memory state (when using old_text, copy entry text EXACTLY as shown):\n")
+
+	// notes：按 § 拆分后逐条展示，让 LLM 能精确复制 old_text
+	sb.WriteString("notes:\n")
+	if notes == "" {
+		sb.WriteString("  (empty)\n")
 	} else {
-		sb.WriteString("  notes: (empty)\n")
+		entries := strings.Split(notes, "§")
+		n := 0
+		for _, e := range entries {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				continue
+			}
+			n++
+			sb.WriteString(fmt.Sprintf("  %d. %s\n", n, e))
+		}
+		if n == 0 {
+			sb.WriteString("  (empty)\n")
+		}
 	}
-	if persona != "" {
-		sb.WriteString("  persona: " + persona + "\n")
+
+	sb.WriteString("persona:\n")
+	if persona == "" {
+		sb.WriteString("  (empty)\n")
 	} else {
-		sb.WriteString("  persona: (empty)\n")
+		sb.WriteString("  " + persona + "\n")
 	}
 	return sb.String()
 }

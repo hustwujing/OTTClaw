@@ -379,7 +379,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "exec",
-				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
+				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -525,7 +525,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "code_search",
-				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files page by page with line numbers\n• git — trace code history (log/blame/diff/show/status/branch/tag)\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
+				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files in chunks (default 80 lines each); result shows remaining chunks — keep calling with chunk=2,3,… until done\n• git — trace code history (log/blame/diff/show/status/branch/tag)\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},

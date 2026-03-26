@@ -731,6 +731,13 @@ func codeChunkRead(args codeSearchArgs) (string, error) {
 	for i := startLine; i < endLine; i++ {
 		sb.WriteString(fmt.Sprintf("%4d  %s\n", i+1, lines[i]))
 	}
+
+	if chunk < totalChunks {
+		sb.WriteString(fmt.Sprintf("\n[%d chunks remaining — call chunk_read with chunk=%d to continue reading]\n",
+			totalChunks-chunk, chunk+1))
+	} else {
+		sb.WriteString("\n[end of file]\n")
+	}
 	return sb.String(), nil
 }
 
