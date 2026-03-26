@@ -702,7 +702,7 @@ footer {
       <div id="msgs"></div>
 
       <footer>
-        <input type="file" id="file-input" style="display:none" />
+        <input type="file" id="file-input" style="display:none" multiple />
         <div class="input-bar">
           <button class="icon-btn" id="btn-upload" title="上传文件 (或拖放到聊天区)" style="flex-shrink:0;margin-bottom:1px">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1376,7 +1376,7 @@ const STEP_META = {
   tool_call:      { icon: '⚙',  cls: 'c-amber', label: '调用工具' },
   tool_done:      { icon: '✓',  cls: 'c-green', label: '工具完成' },
   tool_error:     { icon: '✗',  cls: 'c-red',   label: '工具失败' },
-  compress_start: { icon: '📦', cls: 'c-gray',  label: '压缩中'   },
+  compress_start: { icon: '📦', cls: 'c-gray',  label: '正在压缩'  },
   compress_done:  { icon: '✓',  cls: 'c-green', label: '压缩完成' },
   compress_error: { icon: '✗',  cls: 'c-red',   label: '压缩失败' },
 };
@@ -1895,17 +1895,17 @@ async function uploadFile(file) {
     if (!S.sessionId) { toast('请先连接服务器', 'err'); return; }
     fi.click();
   });
-  fi.addEventListener('change', () => { if (fi.files[0]) { uploadFile(fi.files[0]); fi.value=''; } });
+  fi.addEventListener('change', () => { for (const f of fi.files) uploadFile(f); fi.value = ''; });
 
   const m = msgs();
   m.addEventListener('dragover', e => { e.preventDefault(); m.classList.add('drag-over'); });
   m.addEventListener('dragleave', () => m.classList.remove('drag-over'));
   m.addEventListener('drop', e => {
     e.preventDefault(); m.classList.remove('drag-over');
-    const f = e.dataTransfer.files[0];
-    if (!f) return;
+    const files = [...e.dataTransfer.files];
+    if (!files.length) return;
     if (!S.sessionId) { toast('请先连接服务器', 'err'); return; }
-    uploadFile(f);
+    for (const f of files) uploadFile(f);
   });
 
   // 点击图片：新标签页查看原图
