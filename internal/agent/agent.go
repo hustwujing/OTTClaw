@@ -71,14 +71,14 @@ type Agent struct {
 	turnsSinceReview map[string]int // key: userID，每次 Run 完成后递增，达到 MemoryNudgeInterval 后触发后台 review
 
 	// Fix 2: 会话记忆冻结快照缓存（key: sessionID）
-	memSnapMu    sync.RWMutex
-	memSnaps     map[string]memSnap
+	memSnapMu sync.RWMutex
+	memSnaps  map[string]memSnap
 
 	// Honcho Layer 2
 	honchoClient   *honcho.Client
 	honchoCtxMu    sync.RWMutex
 	honchoCtxCache map[string]string // key: userID → latest prefetched Honcho context string
-	honchoWg       sync.WaitGroup   // 追踪 in-flight syncToHoncho goroutine，优雅退出时等待完成
+	honchoWg       sync.WaitGroup    // 追踪 in-flight syncToHoncho goroutine，优雅退出时等待完成
 
 	// 后台 goroutine 生命周期管理
 	// bgCtx 在 Shutdown() 时被 cancel，使所有后台 goroutine 能感知关闭信号并及时退出。
@@ -382,7 +382,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		}
 
 		if replyText := textBuf.String(); replyText != "" {
-			logger.Info("llm", userID, sessionID, "<<< "+truncate(replyText, 120), 0)
+			logger.Info("llm", userID, sessionID, "<<< "+truncate(replyText, 1024), 0)
 		}
 		logger.Debug("llm", userID, sessionID,
 			fmt.Sprintf("llm call done iter=%d tool_calls=%d cost=%dms",
@@ -1168,7 +1168,7 @@ func isUIOnlyTool(tc llm.ToolCall) bool {
 func isMimickedPlaceholder(text string) bool {
 	t := strings.TrimSpace(text)
 	switch t {
-	case "...", "[ok]", "…", "(continued)", "OK", "ok":
+	case "...", "[ok]", "…", "(continued)", "OK", "ok", "[no result]":
 		return true
 	}
 	// 纯标点/省略号组合
@@ -1395,7 +1395,7 @@ func flattenHistoryToolCalls(msgs []llm.ChatMessage) []llm.ChatMessage {
 			// 不可用 "..."——LLM 会从历史中学习并在后续轮直接输出 "..." 作为完整回答导致异常结束。
 			assistantContent := strings.TrimSpace(m.Content)
 			if assistantContent == "" {
-				assistantContent = "[ok]"
+				assistantContent = "[no result]"
 			}
 			raw = append(raw, llm.ChatMessage{
 				Role:    "assistant",
