@@ -337,8 +337,8 @@ def main() -> None:
     print(f"\n{CYN}{BOLD}═══ OTTClaw 控制台客户端 ═══{RST}\n")
 
     # ── 连接配置 ────────────────────────────────────────────────────────────
-    raw_url  = _ask(f"服务器地址 [{DIM}默认 http://localhost:8080{RST}]: ").strip()
-    base_url = (raw_url or "http://localhost:8080").rstrip("/")
+    raw_url  = _ask(f"服务器地址 [{DIM}默认 http://localhost:8081{RST}]: ").strip()
+    base_url = (raw_url or "http://localhost:8081").rstrip("/")
 
     # ── 自动生成身份 ─────────────────────────────────────────────────────────
     user_id = f"user-{uuid.uuid4().hex[:8]}"
