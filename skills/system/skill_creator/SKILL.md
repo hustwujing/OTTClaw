@@ -94,6 +94,14 @@ Based on the user's described purpose, **draft a complete workflow for the CONTE
   - If there are asset files: specify which step calls `skill(action=read_asset)` and which file to read
   - When user interaction is needed: specify when to use `notify(action=options)` or `notify(action=confirm)`
   - When data needs to pass between steps: specify when to use `kv(action=set, ...)` / `kv(action=get, ...)`
+  - **No-script warning (mandatory when no scripts)**: if the skill has no script files, insert the following block immediately before the first execution step:
+    ```
+    > ⚠️ **Execution Mode:** This skill has no script files. All steps are executed directly by the LLM using built-in tools (read_file, kv, etc.). **Never call `skill(action=run_script)`.**
+    ```
+  - **Sequential execution notice (mandatory in ALL generated skills)**: insert this line at the very start of the Execution Steps section, before Step One:
+    ```
+    > Execute all steps strictly in order, one step at a time. Do not skip or merge steps. Wait for each step's result before proceeding to the next.
+    ```
 - **Output format**: describe the form of the final output (text, table, JSON, etc.)
 - **Notes** (optional): edge cases, error handling suggestions
 

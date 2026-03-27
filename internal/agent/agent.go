@@ -226,6 +226,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	// 持久化用户消息、加载历史、构造 prompt 与 messages
 	state, err := a.initRun(userID, sessionID, userInput)
 	if err != nil {
+		_ = writer.WriteError("初始化失败，请重试")
 		return err
 	}
 	messages := state.messages
@@ -894,14 +895,14 @@ func (a *Agent) persistToolResult(userID, sessionID string, writer StreamWriter,
 		logger.Error("tool", userID, sessionID,
 			fmt.Sprintf("tool %q failed", tc.Function.Name), toolErr, time.Since(toolStart))
 		_ = writer.WriteProgress("tool_error",
-			fmt.Sprintf("%s • %s • %dms", tc.Function.Name, truncate(toolErr.Error(), config.Cfg.ToolErrorSummaryLen), costMs),
+			fmt.Sprintf("%s • %s • %dms", formatToolCall(tc.Function.Name, tc.Function.Arguments), truncate(toolErr.Error(), config.Cfg.ToolErrorSummaryLen), costMs),
 			time.Since(start).Milliseconds())
 	} else {
 		logger.Debug("tool", userID, sessionID,
 			fmt.Sprintf("tool %q done result_len=%d cost=%dms",
 				tc.Function.Name, len(dbContent), costMs), 0)
 		_ = writer.WriteProgress("tool_done",
-			fmt.Sprintf("%s • %dms", tc.Function.Name, costMs),
+			fmt.Sprintf("%s • %dms", formatToolCall(tc.Function.Name, tc.Function.Arguments), costMs),
 			time.Since(start).Milliseconds())
 	}
 	// 超大工具结果：DB 只存重新获取提示，降低历史消息 token 占用；
@@ -1984,6 +1985,10 @@ Rules:
 - Everything between the two separators is the HEAD (key: value fields)
 - Everything after the second separator is the CONTENT (workflow)
 - Be concise — every word counts
+- **Sequential execution notice (mandatory)**: the CONTENT's execution steps section must always begin with this line before the first step:
+  > Execute all steps strictly in order, one step at a time. Do not skip or merge steps. Wait for each step's result before proceeding to the next.
+- **No-script warning (mandatory when no scripts)**: if no script files are written (steps 2-4 skipped), insert this block immediately before the first execution step in CONTENT:
+  > ⚠️ **Execution Mode:** This skill has no script files. All steps are executed directly by the LLM using built-in tools. **Never call skill(action=run_script).**
 
 If nothing is worth saving, reply: SKIP`
 

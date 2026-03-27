@@ -49,6 +49,12 @@ func InitDB() error {
 		if err != nil {
 			return fmt.Errorf("open sqlite: %w", err)
 		}
+		// SQLite 文件级锁：限制为单连接，由 Go 连接池串行化所有操作，
+		// 防止多 goroutine 并发写时出现 "database is locked" 错误。
+		if sqlDB, e := db.DB(); e == nil {
+			sqlDB.SetMaxOpenConns(1)
+			sqlDB.SetMaxIdleConns(1)
+		}
 	}
 
 	// 自动建表 / 更新表结构
