@@ -76,6 +76,7 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Action  string `json:"action"`
 		Target  string `json:"target"`
+		Key     string `json:"key"`      // user_kv 专用：目标 key 名
 		Content string `json:"content"`
 		OldText string `json:"old_text"`
 	}
@@ -87,15 +88,19 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 		"[memory] action=%s target=%s content_len=%d old_text_len=%d",
 		args.Action, args.Target, len([]rune(args.Content)), len([]rune(args.OldText))), 0)
 
+	switch args.Target {
+	case "notes", "persona":
+	case "user_kv":
+		return handleMemoryUserKV(ctx, userID, args.Action, args.Key, args.Content)
+	default:
+		return memoryError("unknown target: " + args.Target + " (valid: notes/persona/user_kv)"), nil
+	}
+
+	// notes / persona 校验
 	switch args.Action {
 	case "get", "add", "replace", "remove":
 	default:
-		return memoryError("unknown action: " + args.Action + " (valid: get/add/replace/remove)"), nil
-	}
-	switch args.Target {
-	case "notes", "persona":
-	default:
-		return memoryError("unknown target: " + args.Target + " (valid: notes/persona)"), nil
+		return memoryError("unknown action: " + args.Action + " (valid for notes/persona: get/add/replace/remove)"), nil
 	}
 	if (args.Action == "add" || args.Action == "replace") && args.Content == "" {
 		return memoryError("content is required for action=" + args.Action), nil
@@ -248,6 +253,94 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 	return string(b), nil
 }
 
+// handleMemoryUserKV 处理 target=user_kv 的操作（get/set/remove/list）
+// 用户维度的业务 KV，存储于 user_data 表，以 user_id + key 唯一定位，跨会话持久。
+// 有别于 session 维度的 kv（会话关闭即丢失）以及 notes/persona（Agent 内部知识）。
+func handleMemoryUserKV(ctx context.Context, userID, action, key, content string) (string, error) {
+	// 校验 action
+	switch action {
+	case "get", "set", "remove", "list":
+	default:
+		return memoryError("unknown action: " + action + " (valid for user_kv: get/set/remove/list)"), nil
+	}
+
+	// list 不需要 key，其余都需要
+	if action != "list" {
+		if key == "" {
+			return memoryError("key is required for action=" + action), nil
+		}
+		if len(key) > 200 {
+			return memoryError("key too long (max 200 chars)"), nil
+		}
+		for _, c := range key {
+			if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' && c != ':' && c != '.' && c != '-' {
+				return memoryError(fmt.Sprintf("key contains invalid character %q (allowed: letters, digits, _ : . -)", c)), nil
+			}
+		}
+	}
+
+	logger.Debug("tool", userID, "", fmt.Sprintf("[memory/user_kv] action=%s key=%s", action, key), 0)
+
+	switch action {
+	case "list":
+		kv, err := storage.ListUserData(userID)
+		if err != nil {
+			return memoryError("list user_kv: " + err.Error()), nil
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "target": "user_kv", "data": kv, "count": len(kv)})
+		return string(b), nil
+
+	case "get":
+		val, exists, err := storage.GetUserData(userID, key)
+		if err != nil {
+			return memoryError("get user_kv: " + err.Error()), nil
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "target": "user_kv", "key": key, "value": val, "exists": exists})
+		return string(b), nil
+
+	case "set":
+		if content == "" {
+			return memoryError("content is required for action=set"), nil
+		}
+		if err := scanMemoryContent(content); err != nil {
+			return memoryError("content rejected by security scan: " + err.Error()), nil
+		}
+		// 条目数上限检查（仅在写入新 key 时）
+		_, exists, err := storage.GetUserData(userID, key)
+		if err != nil {
+			return memoryError("check user_kv existence: " + err.Error()), nil
+		}
+		if !exists {
+			count, err := storage.CountUserData(userID)
+			if err != nil {
+				return memoryError("count user_kv: " + err.Error()), nil
+			}
+			limit := int64(config.Cfg.MemorySkillKVEntryLimit)
+			if count >= limit {
+				return memoryError(fmt.Sprintf("user_kv entry limit reached (%d/%d), remove stale keys first", count, limit)), nil
+			}
+		}
+		if err := storage.SetUserData(userID, key, content); err != nil {
+			return memoryError("set user_kv: " + err.Error()), nil
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "target": "user_kv", "action": "set", "key": key})
+		return string(b), nil
+
+	case "remove":
+		found, err := storage.DeleteUserData(userID, key)
+		if err != nil {
+			return memoryError("remove user_kv: " + err.Error()), nil
+		}
+		if !found {
+			return memoryError("key not found: " + key), nil
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "target": "user_kv", "action": "remove", "key": key})
+		return string(b), nil
+	}
+
+	return memoryError("unexpected code path"), nil
+}
+
 // splitNoteEntries 按 § 分割笔记条目，过滤空条目
 func splitNoteEntries(s string) []string {
 	if s == "" {
@@ -275,19 +368,19 @@ func MemoryTool() llm.Tool {
 		Type: "function",
 		Function: llm.ToolFunction{
 			Name: "memory",
-			Description: `Persist facts across sessions.
-  notes  : your scratchpad — env facts, tool quirks, stable conventions (§-separated entries).
-  persona: who the user is — name, role, preferences, style.
-Save proactively: user corrections, env/tool discoveries, preferences, recurring patterns.
-Skip: task progress, temp state, things easily re-discovered.
-At char limit, replace/remove stale entries first.`,
+			Description: `Cross-session persistence. Target:
+  notes   : agent scratchpad (env facts, quirks, conventions). §-separated. get/add/replace/remove
+  persona : user profile (name, role, style). get/add/replace/remove
+  user_kv : user-scoped business data that outlives sessions — not profile (→persona), not agent notes (→notes). get/set/remove/list
+Save: corrections, discoveries, preferences. Skip: temp state, task progress.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"action":   map[string]any{"type": "string", "description": "get | add | replace | remove"},
-					"target":   map[string]any{"type": "string", "description": "notes | persona"},
-					"content":  map[string]any{"type": "string", "description": "New content (required for add/replace)"},
-					"old_text": map[string]any{"type": "string", "description": "Exact entry text to replace or remove (required for replace/remove)"},
+					"action":   map[string]any{"type": "string", "description": "notes/persona: get|add|replace|remove  user_kv: get|set|remove|list"},
+					"target":   map[string]any{"type": "string", "description": "notes | persona | user_kv"},
+					"key":      map[string]any{"type": "string", "description": "user_kv: key name (letters/digits/_:.- max 200). Namespace to avoid collisions: \"feature:attr\""},
+					"content":  map[string]any{"type": "string", "description": "Required for add/replace/set"},
+					"old_text": map[string]any{"type": "string", "description": "Required for replace/remove (notes/persona)"},
 				},
 				"required": []string{"action", "target"},
 			},

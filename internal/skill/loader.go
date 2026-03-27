@@ -151,7 +151,10 @@ func (s *store) LoadAll(dir string) error {
 					if !sk.Enable {
 						continue
 					}
-					userSkillMap[sk.SkillID] = sk
+					// 用户手工技能优先：self-improving 版不覆盖已存在的同名技能
+					if _, exists := userSkillMap[sk.SkillID]; !exists {
+						userSkillMap[sk.SkillID] = sk
+					}
 				}
 			}
 

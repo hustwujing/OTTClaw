@@ -510,6 +510,22 @@ footer {
   transition: background .15s;
 }
 .stop-btn:hover { background: #dc2626; }
+.queue-bar {
+  display: none; align-items: center; gap: 4px;
+  font-size: .75rem; color: var(--muted); padding: 3px 4px 0;
+}
+.queue-bar.visible { display: flex; }
+.queue-bar-text { flex: 1; }
+.queue-clear-btn {
+  background: none; border: none; cursor: pointer; padding: 0 3px;
+  color: var(--muted); line-height: 1; font-size: .7rem; border-radius: 3px;
+}
+.queue-clear-btn:hover { color: var(--text); background: var(--bg3); }
+.bubble.user.queued { opacity: 0.5; }
+.queued-label {
+  font-size: .68rem; color: var(--muted);
+  text-align: right; padding-right: 2px; margin-top: -1px;
+}
 
 /* ── Toast ───────────────────────────────────────────────────────── */
 #toasts {
@@ -735,6 +751,10 @@ footer {
             </svg>
           </button>
         </div>
+        <div class="queue-bar" id="queue-bar">
+          <span class="queue-bar-text" id="queue-bar-text"></span>
+          <button class="queue-clear-btn" id="queue-clear" title="清空排队消息">✕ 清空</button>
+        </div>
       </footer>
     </div>
   </div>
@@ -757,6 +777,7 @@ const S = {
   token:        '',
   sessionId:    '',
   busy:         false,
+  queue:        [],   // 排队中的消息列表
   abortCtrl:    null,
   aiName:       'AI',
   avatarUrl:    '',
@@ -1145,7 +1166,12 @@ async function streamSSE(message, bubble, signal) {
             if (textBuf) renderMD(bubble, textBuf);
             const kind = ev.step;
             const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : (ev.data || {});
-            choice = await showInteractive(bubble, kind, data);
+            // 与 abort 信号赛跑：点停止时立即抛出 AbortError，不再卡在 showInteractive
+            const abortPromise = new Promise((_, reject) => {
+              if (signal.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+              signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+            });
+            choice = await Promise.race([showInteractive(bubble, kind, data), abortPromise]);
             scrollEnd();
             break;
           }
@@ -1236,6 +1262,13 @@ async function sendMessage(message, showUser = true) {
     // 顶层发送才刷新，递归交互回复无需重复调度
     // 延迟 7s 给后端异步标题生成留足时间（第3轮后触发）
     if (showUser) setTimeout(refreshSessionList, 7000);
+    // 处理排队中的下一条消息（仅顶层调用，避免递归交互响应重复触发）
+    if (showUser && S.queue.length > 0) {
+      const next = S.queue.shift();
+      next.row.remove();   // 移除排队气泡，sendMessage 会重新添加正式气泡
+      updateQueueBadge();
+      sendMessage(next.msg);
+    }
   }
 }
 
@@ -1351,6 +1384,22 @@ function addUserBubble(text) {
   row.appendChild(body);
   msgs().appendChild(row);
   scrollEnd();
+}
+
+function addQueuedUserBubble(text) {
+  const row = el('div', 'row user');
+  const avatar = el('div', 'avatar user'); avatar.textContent = '你';
+  const body = el('div', 'msg-body user');
+  const bubble = el('div', 'bubble user queued');
+  bubble.innerHTML = renderUserText(text);
+  body.appendChild(bubble);
+  const label = el('div', 'queued-label'); label.textContent = '⏳ 排队中';
+  body.appendChild(label);
+  row.appendChild(avatar);
+  row.appendChild(body);
+  msgs().appendChild(row);
+  scrollEnd();
+  return row;
 }
 
 function addAIBubble() {
@@ -1659,9 +1708,19 @@ function preMarkdown(text) {
 }
 
 function setSendState(busy) {
-  document.getElementById('btn-send').style.display = busy ? 'none' : '';
+  // 忙碌时仍保持发送按钮和输入框可用，允许继续排队；只额外显示停止按钮
   document.getElementById('btn-stop').style.display = busy ? 'flex' : 'none';
-  document.getElementById('ta').disabled = busy;
+}
+
+function updateQueueBadge() {
+  const bar = document.getElementById('queue-bar');
+  const txt = document.getElementById('queue-bar-text');
+  if (S.queue.length > 0) {
+    txt.textContent = `⏳ ${S.queue.length} 条消息排队中`;
+    bar.classList.add('visible');
+  } else {
+    bar.classList.remove('visible');
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1936,12 +1995,26 @@ async function uploadFile(file) {
   const ta = document.getElementById('ta');
   document.getElementById('btn-send').addEventListener('click', () => {
     const msg = ta.value.trim();
-    if (!msg || S.busy || !S.sessionId) return;
+    if (!msg || !S.sessionId) return;
     ta.value = ''; autoH(ta);
-    sendMessage(msg);
+    if (S.busy) {
+      const row = addQueuedUserBubble(msg);
+      S.queue.push({ msg, row });
+      updateQueueBadge();
+    } else {
+      sendMessage(msg);
+    }
   });
   document.getElementById('btn-stop').addEventListener('click', () => {
     if (S.abortCtrl) S.abortCtrl.abort();
+    S.queue.forEach(item => item.row.remove());
+    S.queue = [];
+    updateQueueBadge();
+  });
+  document.getElementById('queue-clear').addEventListener('click', () => {
+    S.queue.forEach(item => item.row.remove());
+    S.queue = [];
+    updateQueueBadge();
   });
   let composing = false;
   ta.addEventListener('compositionstart', () => { composing = true; });

@@ -58,7 +58,7 @@ func InitDB() error {
 	}
 
 	// 自动建表 / 更新表结构
-	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &CronJob{}, &UserProfile{}, &TokenUsage{}, &OriginSessionMessage{}); err != nil {
+	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &CronJob{}, &UserProfile{}, &UserData{}, &TokenUsage{}, &OriginSessionMessage{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 
@@ -489,6 +489,64 @@ func UpsertUserNotes(userID, notes string) error {
 		return DB.Create(&UserProfile{UserID: userID, Notes: notes}).Error
 	}
 	return nil
+}
+
+// ----- UserData CRUD -----
+
+// GetUserData 按 user_id + key 查询单条值，不存在时返回 ("", false, nil)
+func GetUserData(userID, key string) (string, bool, error) {
+	var row UserData
+	result := DB.Where("user_id = ? AND key = ?", userID, key).First(&row)
+	if result.Error == gorm.ErrRecordNotFound {
+		return "", false, nil
+	}
+	if result.Error != nil {
+		return "", false, result.Error
+	}
+	return row.Value, true, nil
+}
+
+// SetUserData 创建或覆写 user_id + key 对应的值（upsert）
+func SetUserData(userID, key, value string) error {
+	result := DB.Model(&UserData{}).
+		Where("user_id = ? AND key = ?", userID, key).
+		Update("value", value)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return DB.Create(&UserData{UserID: userID, Key: key, Value: value}).Error
+	}
+	return nil
+}
+
+// DeleteUserData 删除 user_id + key 对应的行，key 不存在时返回 (false, nil)
+func DeleteUserData(userID, key string) (bool, error) {
+	result := DB.Where("user_id = ? AND key = ?", userID, key).Delete(&UserData{})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// ListUserData 返回用户所有 KV 条目（key → value 映射）
+func ListUserData(userID string) (map[string]string, error) {
+	var rows []UserData
+	if err := DB.Where("user_id = ?", userID).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	kv := make(map[string]string, len(rows))
+	for _, r := range rows {
+		kv[r.Key] = r.Value
+	}
+	return kv, nil
+}
+
+// CountUserData 统计用户当前条目数
+func CountUserData(userID string) (int64, error) {
+	var count int64
+	err := DB.Model(&UserData{}).Where("user_id = ?", userID).Count(&count).Error
+	return count, err
 }
 
 // ----- TokenUsage CRUD -----

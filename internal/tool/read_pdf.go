@@ -190,19 +190,21 @@ func handleReadPDF(_ context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 
-	// 安全校验：路径必须在 uploads/ 或 output/ 目录内
+	// 安全校验：路径必须在 uploads/、output/ 或 /tmp 目录内
 	absPath, err := filepath.Abs(args.Path)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	uploadsAbs, _ := filepath.Abs(config.Cfg.UploadDir)
 	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
+	tmpDir := os.TempDir()
 	relUp, errUp := filepath.Rel(uploadsAbs, absPath)
 	relOut, errOut := filepath.Rel(outputAbs, absPath)
 	inUploads := errUp == nil && !strings.HasPrefix(relUp, "..")
 	inOutput := errOut == nil && !strings.HasPrefix(relOut, "..")
-	if !inUploads && !inOutput {
-		return "", fmt.Errorf("path must be within uploads/ or output/ directory")
+	inTmp := absPath == tmpDir || strings.HasPrefix(absPath, tmpDir+string(os.PathSeparator))
+	if !inUploads && !inOutput && !inTmp {
+		return "", fmt.Errorf("path must be within uploads/, output/, or /tmp directory")
 	}
 
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {

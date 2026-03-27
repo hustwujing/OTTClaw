@@ -139,8 +139,9 @@ type AppConfig struct {
 	MemoryEnabled          bool // MEMORY_ENABLED：是否启用 memory 工具（notes/persona 读写），默认 true
 	MemoryFlushMinTurns    int  // MEMORY_FLUSH_MIN_TURNS：触发 session 结束 flush 所需的最少 user 消息数，默认 6，0 禁用
 	MemoryNudgeInterval    int  // MEMORY_NUDGE_INTERVAL：后台 review 触发轮次间隔，默认 10，0 禁用
-	MemoryNotesCharLimit   int  // MEMORY_NOTES_CHAR_LIMIT：Agent notes 字符上限，默认 2200
-	MemoryPersonaCharLimit int  // MEMORY_PERSONA_CHAR_LIMIT：用户人设字符上限，默认 1375
+	MemoryNotesCharLimit    int  // MEMORY_NOTES_CHAR_LIMIT：Agent notes 字符上限，默认 2200
+	MemoryPersonaCharLimit  int  // MEMORY_PERSONA_CHAR_LIMIT：用户人设字符上限，默认 1375
+	MemorySkillKVEntryLimit int  // MEMORY_SKILL_KV_ENTRY_LIMIT：user_kv 每用户最大条目数，默认 200
 
 	// 跨会话搜索
 	SessionSearchEnabled         bool // SESSION_SEARCH_ENABLED：是否启用 session_search 工具，默认 true
@@ -255,8 +256,9 @@ func loadConfig() *AppConfig {
 		MemoryEnabled:          getEnvBool("MEMORY_ENABLED", true),
 		MemoryFlushMinTurns:    getEnvInt("MEMORY_FLUSH_MIN_TURNS", 6),
 		MemoryNudgeInterval:    getEnvInt("MEMORY_NUDGE_INTERVAL", 10),
-		MemoryNotesCharLimit:   getEnvInt("MEMORY_NOTES_CHAR_LIMIT", 2200),
-		MemoryPersonaCharLimit: getEnvInt("MEMORY_PERSONA_CHAR_LIMIT", 1375),
+		MemoryNotesCharLimit:    getEnvInt("MEMORY_NOTES_CHAR_LIMIT", 2200),
+		MemoryPersonaCharLimit:  getEnvInt("MEMORY_PERSONA_CHAR_LIMIT", 1375),
+		MemorySkillKVEntryLimit: getEnvInt("MEMORY_SKILL_KV_ENTRY_LIMIT", 200),
 		SessionSearchEnabled:         getEnvBool("SESSION_SEARCH_ENABLED", true),
 		SessionSearchSummaryMaxChars: getEnvInt("SESSION_SEARCH_SUMMARY_MAX_CHARS", 50000),
 		HonchoEnabled:          getEnvBool("HONCHO_ENABLED", false),

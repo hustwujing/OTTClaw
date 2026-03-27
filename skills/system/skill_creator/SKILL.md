@@ -23,6 +23,8 @@ Once complete, hot-reload into the system for immediate use.
 
 ### Step Zero: Read the Format Template
 
+⚠️ **Mandatory. Complete this step before Step One. Do not draft any SKILL.md content without reading the template first.**
+
 Call `skill(action=read_asset, skill_id=skill_creator, asset_name=skill_template.md)` to retrieve the SKILL.md format specification and Python script skeleton template. Follow them strictly throughout the subsequent steps.
 
 ---
@@ -42,17 +44,42 @@ Ask the user the following questions one at a time (wait for each answer before 
 
 ---
 
-### Step Two: Confirm Whether Scripts Are Needed
+### Step One Point Five: Analyze Data Storage Needs
 
-Ask the user: "Does this skill need to execute Python scripts to perform data processing, external API calls, format conversion, or similar tasks?"
+After understanding the skill's purpose, **carefully evaluate whether the skill needs to store or pass data**, and at what scope:
 
-- If **scripts are needed**:
-  - Ask for the script file name (e.g. `process.py`)
-  - Ask for the script's specific functionality: what input it receives (command-line arguments) and what it outputs (stdout)
-  - Generate a complete Python script skeleton based on the described functionality (follow the skeleton format in the template)
-  - If multiple scripts are needed, repeat the above process
+| Scope | Storage Tool | Use When |
+|-------|-------------|----------|
+| **Session-scoped** (current conversation only) | `kv(action=set/get, key=..., value=...)` | Intermediate results passed between steps within one session; data meaningful only for the current task |
+| **User-scoped business data** | `memory(action=set/get, target=user_kv, key=..., value=...)` | Persistent user content, records, or business state that must survive across sessions |
+| **Agent self-learning** | `memory(action=set/get, target=notes, ...)` | Patterns or knowledge the agent learns from the user; improves future performance |
+| **User style/memory** | `memory(action=set/get, target=persona, ...)` | User's communication style, known facts about the user, personal preferences |
 
-- If **not needed**: skip this step
+**Decision guide**:
+- Data only needed within the current task → `kv`
+- Skill builds a personalized user database → `memory(target=user_kv)`
+- Skill learns from user behavior to improve → `memory(target=notes)`
+- Skill remembers how the user likes things → `memory(target=persona)`
+
+Document which steps write to / read from storage and at what scope. This will be reflected in the CONTENT execution steps. If the skill is stateless (no persistent state needed), note this and skip storage design.
+
+---
+
+### Step Two: Design Scripts (Script-First Default)
+
+**Script-first principle: default to scripts for any task that can be handled programmatically.** If a step involves data processing, format conversion, computation, external API calls, file operations, or structured output generation — use a script, not LLM inference. Reserve LLM for tasks that genuinely require language understanding or creativity (writing, summarization, translation, open-ended Q&A).
+
+Based on the skill purpose from Step One, proactively identify which steps need scripts:
+
+- **Use scripts for**: data parsing, format conversion, statistical analysis, API calls, batch file operations, regex extraction, CSV/JSON processing, numerical computation, any deterministic transformation
+- **LLM-only is acceptable for**: pure text generation, summarization, rewriting, translation, conversational Q&A
+
+For each scripted step:
+- Decide the script file name (e.g. `process.py`)
+- Clarify its input (command-line argument, JSON string) and output (stdout, JSON string)
+- Generate a complete Python script skeleton following the template format; if multiple scripts are needed, repeat
+
+If the skill is **purely LLM text generation with no scripted steps**, note this and skip.
 
 ---
 
@@ -93,7 +120,7 @@ Based on the user's described purpose, **draft a complete workflow for the CONTE
   - If there are reference files: specify which step calls `skill(action=read_reference)` and which file to read
   - If there are asset files: specify which step calls `skill(action=read_asset)` and which file to read
   - When user interaction is needed: specify when to use `notify(action=options)` or `notify(action=confirm)`
-  - When data needs to pass between steps: specify when to use `kv(action=set, ...)` / `kv(action=get, ...)`
+  - When data needs to pass between steps: use `kv(action=set/get, ...)` for session-scoped data; use `memory(action=set/get, target=user_kv/notes/persona, ...)` for user-scoped data that must persist across sessions (as decided in Step One Point Five)
   - **No-script warning (mandatory when no scripts)**: if the skill has no script files, insert the following block immediately before the first execution step:
     ```
     > ⚠️ **Execution Mode:** This skill has no script files. All steps are executed directly by the LLM using built-in tools (read_file, kv, etc.). **Never call `skill(action=run_script)`.**
@@ -190,10 +217,12 @@ First retrieve the draft content saved in Step Four via `kv(action=get, ...)`, t
 
 1. `kv(action=get, key="_draft_skill_md")` — retrieve SKILL.md content
 2. `notify(action=progress)`: "Validating and writing SKILL.md..."
+2.5. **Pre-write check**: if `skill_template.md` was not read in Step Zero, call `skill(action=read_asset, skill_id=skill_creator, asset_name=skill_template.md)` now before writing.
 3. `skill(action=write, skill_id=..., content=<content retrieved from kv>)`
    - The tool will automatically validate the format (two separators, required fields, non-empty CONTENT)
    - If a format error is returned, show the specific error to the user and return to Step Four to fix it
-   - If an "already exists" error is returned, ask the user whether to use a different skill_id
+   - If the skill already exists, it will be overwritten (update mode)
+   - **Write destination**: user-created skills are written to `skills/users/<current_userid>/<skill_id>/`; agent self-improving skills go to `skills/users/<current_userid>/self-improving/skills/<skill_id>/`; `skills/system/` is always read-only and cannot be written
 4. `kv(action=get, key="_draft_scripts")` — retrieve script list (skip if empty array)
 5. (If scripts exist) `notify(action=progress)`: "Writing script files..."
 6. (If scripts exist) For each script in the list, call `skill(action=write, skill_id=..., content=..., sub_path="script/<script_name>")`
@@ -217,6 +246,8 @@ First retrieve the draft content saved in Step Four via `kv(action=get, ...)`, t
 - **Format is auto-validated by the tool**: `skill(action=write)` parses the content before writing. Format errors return a descriptive error message — no need to manually verify separator counts.
 - **Do not write files without user confirmation**: writing tools must only be called after "Confirm Creation" is received from the `notify(action=confirm)` in Step Five.
 - **Tool references in SKILL.md must be consistent**: if CONTENT mentions `skill(action=run_script)`, there must be a corresponding script; if it mentions `skill(action=read_reference)`, there must be a corresponding file in `references/`; if it mentions `skill(action=read_asset)`, there must be a corresponding file in `assets/`.
+- **Script-first**: For any step involving data processing, computation, API calls, or structured transformation — default to a script. LLM-only processing should be the exception, not the norm.
+- **Data storage scope**: Always analyze what data the skill needs to persist before drafting CONTENT. Session-scoped data → `kv`; user-scoped business data → `memory(target=user_kv)`; agent learning → `memory(target=notes)`; user style/preferences → `memory(target=persona)`. Using the wrong scope (e.g. kv for data that must survive across sessions) is a correctness bug.
 - **Python script skeleton quality**: scripts should include an entry function, argument parsing, and error handling, following the skeleton format in the template, so that users can quickly fill in the business logic.
 - **CONTENT steps must be specific**: each tool call should clearly specify skill_id and parameter names — avoid vague descriptions like "call some tool".
 - **SKILL.md must be concise**: SKILL.md CONTENT is loaded on every skill invocation. Keep all descriptions brief and actionable — omit verbose explanations and redundant examples. Every extra sentence increases token cost each time the skill runs.

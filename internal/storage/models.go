@@ -120,6 +120,18 @@ type UserProfile struct {
 
 func (UserProfile) TableName() string { return "user_profiles" }
 
+// UserData 用户维度 KV 数据表：跨会话持久存储的用户级别业务数据（有别于 session 维度的临时 KV 和 user_profiles 中的 persona/notes）
+type UserData struct {
+	ID        uint      `gorm:"primaryKey;autoIncrement;column:id"`
+	UserID    string    `gorm:"column:user_id;not null;uniqueIndex:uidx_user_key"`
+	Key       string    `gorm:"column:key;not null;uniqueIndex:uidx_user_key"`
+	Value     string    `gorm:"column:value;type:text;not null;default:''"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (UserData) TableName() string { return "user_data" }
+
 // TokenUsage LLM 调用 token 消耗记录，每次 LLM 调用写一条
 type TokenUsage struct {
 	ID               uint      `gorm:"primaryKey;autoIncrement;column:id"`

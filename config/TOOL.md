@@ -375,7 +375,27 @@ Sure, here is the generated image:
 
 **Purpose**: Unified skill operations entry. Merges `get_skill_content` / `run_script` / `read_asset` / `write_skill_file` / `reload_skills` into a single tool dispatched by `action`.
 
-> **⚠️ Never use `fs` to access skill files.** The internal directory layout (`system/` vs `users/`) is not exposed — always use `skill(action=read_asset)`, `skill(action=read_reference)`, or `skill(action=write)` to read/write skill content.
+> **⚠️ Never use `fs` to access skill files.** Always use `skill()` actions — they handle path resolution automatically.
+
+**Skill directory structure** (three tiers):
+
+| Tier | Path | Access |
+|------|------|--------|
+| System skills | `skills/system/<skill_id>/` | All users, **read-only** |
+| User private skills | `skills/users/<userid>/<skill_id>/` | Owner only, read/write |
+| Agent self-improving skills | `skills/users/<userid>/self-improving/skills/<skill_id>/` | Owner only, read/write |
+
+**Read priority** (`run_script` / `read_asset` / `read_reference` search in this order):
+1. `skills/users/<userid>/<skill_id>/`
+2. `skills/users/<userid>/self-improving/skills/<skill_id>/`
+3. `skills/system/<skill_id>/`
+
+User-crafted skills always override self-improving skills with the same `skill_id`. If not found in any tier, an error is returned listing all paths searched.
+
+**Write destination**:
+- `skill(action=write)` (normal) → `skills/users/<userid>/<skill_id>/`
+- Self-improving write → `skills/users/<userid>/self-improving/skills/<skill_id>/`
+- `skills/system/` is **always read-only** — writes are rejected.
 
 **`write` sub_path rules**:
 - **Omit `sub_path`** → writes `SKILL.md` (do NOT pass `sub_path="SKILL.md"`)
@@ -388,10 +408,10 @@ Sure, here is the generated image:
 | action | Required parameters | Description |
 |--------|----------|------|
 | `load` | `skill_id` | Load the full content of a skill. **Must be called before executing any skill.** |
-| `run_script` | `skill_id`, `script_name` | Execute a script in the skill's `script/` directory. Auto-selects interpreter by extension (.sh→bash, .py→python3, .js→node). 60s timeout. Optional `args` (string array). |
-| `read_asset` | `skill_id`, `asset_name` | Read a file from the skill's `assets/` directory (asset files: images, generated outputs, binary data, etc.). `asset_name` is relative to `assets/`. |
-| `read_reference` | `skill_id`, `reference_name` | Read a file from the skill's `references/` directory (reference files: style guides, templates, spec docs, examples, etc.). `reference_name` is relative to `references/`. |
-| `write` | `skill_id`, `content` | Write a skill file. Omit `sub_path` to write `SKILL.md` (new skill); use `sub_path="script/foo.sh"`, `sub_path="assets/bar.json"`, or `sub_path="references/baz.md"` for other files. `skill_id`: lowercase letters/digits/underscores only. Cannot overwrite existing `SKILL.md`. **Must call `skill(action=reload)` after writing SKILL.md.** |
+| `run_script` | `skill_id`, `script_name` | Execute `script/<script_name>` in the skill directory (read priority: user → self-improving → system). Auto-selects interpreter by extension (.sh→bash, .py→python3, .js→node). 60s timeout. Optional `args` (string array). |
+| `read_asset` | `skill_id`, `asset_name` | Read `assets/<asset_name>` from the skill directory (read priority: user → self-improving → system). |
+| `read_reference` | `skill_id`, `reference_name` | Read `references/<reference_name>` from the skill directory (read priority: user → self-improving → system). |
+| `write` | `skill_id`, `content` | Write a skill file to `skills/users/<userid>/<skill_id>/`. Omit `sub_path` to write `SKILL.md`; use `sub_path="script/foo.sh"` / `"assets/bar.json"` / `"references/baz.md"` for other files. `skill_id`: lowercase letters/digits/underscores only. **Must call `skill(action=reload)` after writing SKILL.md.** |
 | `reload` | — | Reload all skills to make newly written skills available immediately. |
 
 **Examples**:
@@ -532,12 +552,39 @@ Sure, here is the generated image:
 
 ---
 
+## kv
+
+Session scratch space — **lost when session ends**. For passing intermediate data between steps within one session only.
+
+| action | behavior |
+|--------|----------|
+| `get` | returns value, or null if missing |
+| `set` | overwrite (any JSON type) |
+| `append` | add element to array; creates array if absent |
+
+---
+
+## memory
+
+Cross-session persistence. Three targets:
+
+| target | what to store | actions |
+|--------|---------------|---------|
+| `notes` | agent scratchpad — env facts, tool quirks, conventions (§-separated) | get / add / replace / remove |
+| `persona` | user profile — name, role, communication style | get / add / replace / remove |
+| `user_kv` | user-scoped business data that outlives sessions — not profile info (→ persona), not agent internals (→ notes); e.g. settings, task states, last-run timestamps | get / set / remove / list |
+
+`user_kv` key format: letters/digits/`_:.-`, max 200 chars. Namespace to avoid collisions: `"feature:attr"`.
+`user_kv` entry limit: configurable via `MEMORY_SKILL_KV_ENTRY_LIMIT` (default 200); no auto-cleanup — remove stale keys manually when limit is reached.
+
+---
+
 ## Usage Guidelines
 1. **notify(progress)**: Proactively push progress on waits and multi-step ops.
 2. **Stop after interactive tools**: After notify(options/confirm) or send_file_upload, stop — wait for user reply next turn.
 3. **notify(confirm) before irreversible ops** (delete, send, submit).
-4. **run_script/read_asset/read_reference**: Only when SKILL.md explicitly instructs; do not self-invoke.
-5. **KV**: set=overwrite, append=accumulate. Write results to KV at skill end; check KV at skill start before reprocessing.
+4. **skill execution flow**: Always call `skill(action=load)` first → read the returned SKILL.md content and available file listing → follow the steps as written → only call `run_script`/`read_asset`/`read_reference` when the loaded SKILL.md explicitly directs it. Never invoke these actions without loading first.
+5. **kv vs memory(user_kv)**: `kv` is session-scoped — use for inter-step scratch within one session. `memory(target=user_kv)` persists across sessions — use for user-level business data. Never use `kv` for data that must survive session close.
 6. **On tool error**: explain to user.
 7. **skill(reload) after skill(write)**: must call immediately after; otherwise new skill won't load.
 8. **tool_request**: check list before submitting (avoid duplicates); auto-close pending items already covered by existing tools.

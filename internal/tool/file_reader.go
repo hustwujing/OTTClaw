@@ -27,7 +27,7 @@ import (
 // readUploadedFile 读取上传文件的文本内容，path 为 upload API 返回的相对路径
 // （如 "uploads/A/abc123.docx"）。
 func readUploadedFile(path string) (string, error) {
-	// 安全校验：路径必须在 uploads 目录内，防止目录穿越
+	// 安全校验：路径必须在 uploads/ 或 /tmp 目录内，防止目录穿越
 	uploadsAbs, err := filepath.Abs(config.Cfg.UploadDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve uploads dir: %w", err)
@@ -36,9 +36,12 @@ func readUploadedFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	rel, err := filepath.Rel(uploadsAbs, absPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("path is outside uploads directory")
+	tmpDir := os.TempDir()
+	inTmp := absPath == tmpDir || strings.HasPrefix(absPath, tmpDir+string(os.PathSeparator))
+	rel, relErr := filepath.Rel(uploadsAbs, absPath)
+	inUploads := relErr == nil && !strings.HasPrefix(rel, "..")
+	if !inUploads && !inTmp {
+		return "", fmt.Errorf("path must be within uploads/ or /tmp directory")
 	}
 
 	if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {

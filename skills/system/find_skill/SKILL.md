@@ -47,6 +47,8 @@ For each selected skill:
 
 **4a. Read the OTTClaw format template first:**
 
+⚠️ **Required before steps 4b–4g. Do not convert or write any SKILL.md without completing this step.**
+
 ```
 skill(action=read_asset, skill_id=skill_creator, asset_name=skill_template.md)
 ```
@@ -113,6 +115,7 @@ Retrieve from KV and write in order:
 
 1. `kv(action=get, key="_install_skill_md")`
 2. `notify(action=progress)`: "Writing SKILL.md..."
+2.5. **Pre-write check**: if `skill_template.md` was not read in Step 4a, call `skill(action=read_asset, skill_id=skill_creator, asset_name=skill_template.md)` now before writing.
 3. `skill(action=write, skill_id=..., content=<retrieved content>)` — **do NOT include `sub_path`; omitting it is how SKILL.md is written**
    - If an error is returned, show it to the user and stop
 4. `kv(action=get, key="_install_scripts")` — skip if empty array

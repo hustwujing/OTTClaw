@@ -296,7 +296,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "kv",
-				Description: "Session KV store. action: get (returns null if missing) / set (overwrite, any JSON type) / append (add to array, creates if absent).",
+				Description: "Session scratch space — lost when session ends. For inter-step data within one session only. For data that must outlive the session use memory(target=user_kv). action: get (null if missing) / set (overwrite, any JSON) / append (add to array).",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -320,11 +320,11 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "read_file",
-				Description: "Extract text from uploaded .docx/.pptx/.xlsx. For PDF use read_pdf.",
+				Description: "Extract text from .docx/.pptx/.xlsx in uploads/ or /tmp. For PDF use read_pdf.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"path": map[string]any{"type": "string", "description": "Uploaded file path"},
+						"path": map[string]any{"type": "string", "description": "File path (uploads/ or /tmp)"},
 					},
 					"required": []string{"path"},
 				},
@@ -366,7 +366,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "fs",
-				Description: "File system ops. For code/doc files prefer code_search (outline/chunk_read/grep) over read. action: list / stat / read (images→multimodal; text max 512KB) / write (uploads/output/skills/ only) / delete / move / mkdir.",
+				Description: "File system ops. For code/doc files prefer code_search (outline/chunk_read/grep) over read. action: list / stat / read (images→multimodal; text max 512KB) / write (uploads/output/skills//tmp/extra_fs_dirs) / delete / move / mkdir.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -434,7 +434,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 					"properties": map[string]any{
 						"content":       map[string]any{"type": "string", "description": "New ROLE.md content"},
 						"avatar_url":    map[string]any{"type": "string", "description": "Avatar file path (optional, e.g. uploads/3/abc.png)"},
-						"extra_fs_dirs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Extra absolute paths users can access via fs"},
+						"extra_fs_dirs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Extra absolute paths all users can read and write via fs (shared directories)"},
 						"finalize":      map[string]any{"type": "boolean", "description": "Set true ONLY at final bootstrap step to lock initialized=true"},
 					},
 					"required": []string{"content"},
@@ -513,7 +513,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 					"properties": map[string]any{
 						"path": map[string]any{
 							"type":        "string",
-							"description": "PDF path (uploads/ or output/ only)",
+							"description": "PDF path (uploads/, output/, or /tmp)",
 						},
 						"pages": map[string]any{
 							"type":        "string",
@@ -532,7 +532,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "code_search",
-				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files in chunks (default 80 lines each); result shows remaining chunks — keep calling with chunk=2,3,… until done\n• git — trace code history (log/blame/diff/show/status/branch/tag)\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
+				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files in chunks (default 80 lines each); result shows remaining chunks — keep calling with chunk=2,3,… until done\n• git — trace code history; requires git_action param: log/blame/diff/show/status/branch/tag\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},
@@ -801,6 +801,21 @@ func handleSendFileUpload(ctx context.Context, argsJSON string) (string, error) 
 	return "ok", nil
 }
 
+// listDirFiles 列出目录下的直接子文件（非递归）；目录不存在时返回 nil。
+func listDirFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 // handleGetSkillContent 读取指定 skill_id 的完整内容，并向前端推送技能的优雅名称。
 func handleGetSkillContent(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
@@ -837,8 +852,22 @@ func handleGetSkillContent(ctx context.Context, argsJSON string) (string, error)
 			_ = sender(name)
 		}
 	}
-	// Approximate LFU usage tracking: record when a self-improving skill is loaded.
+	// 构建技能元信息头：物理位置 + 可用文件清单，让 Agent 在执行前就掌握全部上下文。
 	if skillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
+		var hdr strings.Builder
+		fmt.Fprintf(&hdr, "[Skill directory: %s]\n", skillDir)
+		if scripts := listDirFiles(filepath.Join(skillDir, "script")); len(scripts) > 0 {
+			fmt.Fprintf(&hdr, "[Available scripts: %s]\n", strings.Join(scripts, ", "))
+		}
+		if assets := listDirFiles(filepath.Join(skillDir, "assets")); len(assets) > 0 {
+			fmt.Fprintf(&hdr, "[Available assets: %s]\n", strings.Join(assets, ", "))
+		}
+		if refs := listDirFiles(filepath.Join(skillDir, "references")); len(refs) > 0 {
+			fmt.Fprintf(&hdr, "[Available references: %s]\n", strings.Join(refs, ", "))
+		}
+		content = hdr.String() + "\n" + content
+
+		// Approximate LFU usage tracking: record when a self-improving skill is loaded.
 		siMarker := filepath.Join("self-improving", "skills")
 		if strings.Contains(skillDir, siMarker) {
 			userSkillsDir := skill.Store.GetUserSkillsDir(userID)
@@ -879,7 +908,13 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 
 	skillDir, ok := skill.Store.GetSkillDir(userIDFromCtx(ctx), args.SkillID)
 	if !ok {
-		return "", fmt.Errorf("skill %q not found", args.SkillID)
+		baseDir := skill.Store.GetBaseDir()
+		uid := userIDFromCtx(ctx)
+		return "", fmt.Errorf("skill %q not found; searched:\n  1. %s\n  2. %s\n  3. %s",
+			args.SkillID,
+			filepath.Join(baseDir, "users", uid, "self-improving", "skills", args.SkillID),
+			filepath.Join(baseDir, "users", uid, args.SkillID),
+			filepath.Join(baseDir, "system", args.SkillID))
 	}
 
 	// 构造并校验脚本绝对路径，防止路径穿越
@@ -899,7 +934,7 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 	}
 
 	if _, err := os.Stat(absScriptPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("script %q not found in skill %q", args.ScriptName, args.SkillID)
+		return "", fmt.Errorf("script %q not found in skill %q (searched: %s)", args.ScriptName, args.SkillID, absScriptPath)
 	}
 
 	// 按扩展名选择解释器
@@ -921,6 +956,11 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 
 	cmd := exec.CommandContext(runCtx, cmdArgs[0], cmdArgs[1:]...)
 	cmd.Dir = skillDir // 工作目录设为技能根目录
+	// 注入 session / user 上下文，脚本可用 os.environ["SKILL_SESSION_ID"] 构造隔离的 /tmp 子目录
+	cmd.Env = append(os.Environ(),
+		"SKILL_SESSION_ID="+sessionIDFromCtx(ctx),
+		"SKILL_USER_ID="+userIDFromCtx(ctx),
+	)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -960,7 +1000,13 @@ func handleReadAsset(ctx context.Context, argsJSON string) (string, error) {
 
 	skillDir, ok := skill.Store.GetSkillDir(userIDFromCtx(ctx), args.SkillID)
 	if !ok {
-		return "", fmt.Errorf("skill %q not found", args.SkillID)
+		baseDir := skill.Store.GetBaseDir()
+		uid := userIDFromCtx(ctx)
+		return "", fmt.Errorf("skill %q not found; searched:\n  1. %s\n  2. %s\n  3. %s",
+			args.SkillID,
+			filepath.Join(baseDir, "users", uid, "self-improving", "skills", args.SkillID),
+			filepath.Join(baseDir, "users", uid, args.SkillID),
+			filepath.Join(baseDir, "system", args.SkillID))
 	}
 
 	// 构造并校验资产绝对路径，防止路径穿越
@@ -982,7 +1028,7 @@ func handleReadAsset(ctx context.Context, argsJSON string) (string, error) {
 	data, err := os.ReadFile(absAssetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("asset %q not found in skill %q", args.AssetName, args.SkillID)
+			return "", fmt.Errorf("asset %q not found in skill %q (searched: %s)", args.AssetName, args.SkillID, absAssetPath)
 		}
 		return "", fmt.Errorf("read asset %q: %w", args.AssetName, err)
 	}
@@ -1010,7 +1056,13 @@ func handleReadReference(ctx context.Context, argsJSON string) (string, error) {
 
 	skillDir, ok := skill.Store.GetSkillDir(userIDFromCtx(ctx), args.SkillID)
 	if !ok {
-		return "", fmt.Errorf("skill %q not found", args.SkillID)
+		baseDir := skill.Store.GetBaseDir()
+		uid := userIDFromCtx(ctx)
+		return "", fmt.Errorf("skill %q not found; searched:\n  1. %s\n  2. %s\n  3. %s",
+			args.SkillID,
+			filepath.Join(baseDir, "users", uid, "self-improving", "skills", args.SkillID),
+			filepath.Join(baseDir, "users", uid, args.SkillID),
+			filepath.Join(baseDir, "system", args.SkillID))
 	}
 
 	// 构造并校验参考文件绝对路径，防止路径穿越
@@ -1032,7 +1084,7 @@ func handleReadReference(ctx context.Context, argsJSON string) (string, error) {
 	data, err := os.ReadFile(absRefPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("reference %q not found in skill %q", args.ReferenceName, args.SkillID)
+			return "", fmt.Errorf("reference %q not found in skill %q (searched: %s)", args.ReferenceName, args.SkillID, absRefPath)
 		}
 		return "", fmt.Errorf("read reference %q: %w", args.ReferenceName, err)
 	}
@@ -1281,14 +1333,15 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 			return "", fmt.Errorf("skill security scan rejected SKILL.md: %w", err)
 		}
 		mdPath := filepath.Join(absSkillDir, "SKILL.md")
-		if _, statErr := os.Stat(mdPath); statErr == nil {
-			return "", fmt.Errorf("skill %q already exists; overwriting is not allowed", args.SkillID)
-		}
+		_, isUpdate := os.Stat(mdPath)
 		if err := os.MkdirAll(absSkillDir, 0o755); err != nil {
 			return "", fmt.Errorf("create skill directory: %w", err)
 		}
 		if err := os.WriteFile(mdPath, []byte(args.Content), 0o644); err != nil {
 			return "", fmt.Errorf("write SKILL.md: %w", err)
+		}
+		if isUpdate == nil {
+			return fmt.Sprintf("skill %q updated (SKILL.md overwritten)", args.SkillID), nil
 		}
 		return fmt.Sprintf("SKILL.md written to %s", mdPath), nil
 	}

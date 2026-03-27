@@ -109,7 +109,16 @@
 """
 
 import json
+import os
 import sys
+
+
+# /tmp 仅用于会话内步骤间的临时中转文件（session 结束后自然消亡）。
+# 使用 SKILL_SESSION_ID 构造独占子目录，避免多用户并发时互相覆盖：
+#   work_dir = os.path.join("/tmp", os.environ.get("SKILL_SESSION_ID", "default"))
+#   os.makedirs(work_dir, exist_ok=True)
+# 需要持久保存的文件请写入 output/{SKILL_USER_ID}/ 并将路径 print 到 stdout，
+# 由 LLM 调用 output_file(action=download) 生成下载链接。
 
 
 def main() -> None:

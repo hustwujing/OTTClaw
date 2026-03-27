@@ -7,10 +7,12 @@
 //
 // 安全策略：
 //   - 所有操作：路径必须在项目工作目录内（checkInProject），禁止访问宿主机任意路径
+//   - /tmp 目录：读写均允许（脚本临时文件，不含敏感数据）
 //   - fs_read / fs_list：额外阻断 .env、*.db、data/ 等敏感路径（checkSensitivePath）
 //   - fs_write / fs_delete / fs_move / fs_mkdir：
 //       · 仅限 uploads/ 或 output/（共享）
 //       · 或 skills/users/{userID}/（当前用户专属目录，不可跨用户操作）
+//       · 或 /tmp/（临时目录，所有用户可写）
 //       · skills/system/ 永远只读，任何用户都不能写入或删除
 package tool
 
@@ -60,6 +62,12 @@ func checkWritable(path, userID string) error {
 		return nil
 	}
 
+	// /tmp 目录：允许写入（脚本临时文件）
+	tmpDir := os.TempDir()
+	if abs == tmpDir || strings.HasPrefix(abs, tmpDir+string(os.PathSeparator)) {
+		return nil
+	}
+
 	cwd, _ := os.Getwd()
 
 	// 保护系统技能目录：initialized 后永久只读
@@ -91,7 +99,17 @@ func checkWritable(path, userID string) error {
 		}
 	}
 
-	return fmt.Errorf("路径 %q 不在允许操作的目录内（uploads、output、skills/users/%s）", path, userID)
+	// extra_fs_dirs：管理员初始化时配置的共享目录，所有用户均可读写
+	for _, dir := range appCfg.ExtraFsDirs {
+		if dir == "" {
+			continue
+		}
+		if abs == dir || strings.HasPrefix(abs, dir+string(os.PathSeparator)) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("路径 %q 不在允许操作的目录内（uploads、output、skills/users/%s、/tmp、extra_fs_dirs）", path, userID)
 }
 
 // checkInProject 确保路径在项目工作目录或管理员配置的白名单目录内，
@@ -109,6 +127,12 @@ func checkInProject(path string) error {
 
 	// 初始化阶段：解除目录限制
 	if !appCfg.Initialized {
+		return nil
+	}
+
+	// 允许：/tmp 目录（脚本临时文件）
+	tmpDir := os.TempDir()
+	if abs == tmpDir || strings.HasPrefix(abs, tmpDir+string(os.PathSeparator)) {
 		return nil
 	}
 

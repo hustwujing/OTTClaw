@@ -303,7 +303,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		}
 
 		// 通知客户端：即将调用 LLM，进入等待状态（前端可展示 thinking 动画）
-		_ = writer.WriteProgress("llm_call", "思考中", time.Since(start).Milliseconds())
+		_ = writer.WriteProgress("llm_call", config.Cfg.LLMModel+" 正在飞速思考中，GPU都快干烧了...", time.Since(start).Milliseconds())
 
 		// 调用 LLM 流式接口
 		// 重试策略：
@@ -326,7 +326,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					logger.Warn("llm", userID, sessionID,
 						fmt.Sprintf("llm rate limited (retry %d/%d), waiting %v", retries429, len(backoff429), wait), 0)
 					_ = writer.WriteProgress("llm_call",
-						fmt.Sprintf("服务繁忙，正在重试 (%d/%d)…", retries429, len(backoff429)),
+						fmt.Sprintf("GPU果然干烧了，让我再来一次 (%d/%d)…", retries429, len(backoff429)),
 						time.Since(start).Milliseconds())
 					select {
 					case <-time.After(wait):

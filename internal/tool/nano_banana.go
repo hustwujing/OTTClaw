@@ -139,7 +139,7 @@ func handleNanoBanana(ctx context.Context, argsJSON string) (string, error) {
 	}
 
 	// 下载生成图片并保存到 output/
-	localPath, webPath, err := downloadNanoBananaImage(imageURL, cfg.OutputDir)
+	localPath, webPath, err := downloadNanoBananaImage(imageURL, cfg.OutputDir, userIDFromCtx(ctx))
 	if err != nil {
 		// 下载失败时降级：只返回错误信息，不回传 imageURL（可能是巨型 base64，会污染消息上下文）
 		return "", fmt.Errorf("保存图片失败：%w", err)
@@ -242,11 +242,11 @@ func resolveNanoBananaImage(ref string) (string, error) {
 
 // downloadNanaBananaImage 下载远端图片，保存到 output/{bucket}/{filename}
 // 返回 (本地绝对路径, web 相对路径, error)
-func downloadNanaBananaImage(imageURL, outputDir string) (string, string, error) {
-	return downloadNanoBananaImage(imageURL, outputDir)
+func downloadNanaBananaImage(imageURL, outputDir, userID string) (string, string, error) {
+	return downloadNanoBananaImage(imageURL, outputDir, userID)
 }
 
-func downloadNanoBananaImage(imageURL, outputDir string) (string, string, error) {
+func downloadNanoBananaImage(imageURL, outputDir, userID string) (string, string, error) {
 	var imgData []byte
 	var ext string
 
@@ -316,13 +316,16 @@ func downloadNanoBananaImage(imageURL, outputDir string) (string, string, error)
 		}
 	}
 
-	// 按 MD5 第二位分桶，与 write_output_file 保持一致
+	// 按 MD5 第二位分桶，与 write_output_file 保持一致；加 userID 子目录隔离多用户
 	sum := md5.Sum(imgData)
 	hexHash := fmt.Sprintf("%x", sum)
 	bucketDir := strings.ToUpper(string(hexHash[1]))
 
+	if userID == "" {
+		userID = "_shared"
+	}
 	filename := fmt.Sprintf("nb_%d%s", time.Now().UnixMilli(), ext)
-	dir := filepath.Join(outputDir, bucketDir)
+	dir := filepath.Join(outputDir, userID, bucketDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create output dir: %w", err)
 	}

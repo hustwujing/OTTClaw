@@ -22,7 +22,7 @@ import (
 
 // handleWriteOutputFile 将文本内容写入分桶输出目录。
 // 分桶规则：取内容 MD5 的第二位十六进制字符（大写）作为子目录名。
-func handleWriteOutputFile(_ context.Context, argsJSON string) (string, error) {
+func handleWriteOutputFile(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Filename string `json:"filename"`
 		Content  string `json:"content"`
@@ -54,7 +54,12 @@ func handleWriteOutputFile(_ context.Context, argsJSON string) (string, error) {
 	hexHash := fmt.Sprintf("%x", sum)
 	bucketDir := strings.ToUpper(string(hexHash[1]))
 
-	dir := filepath.Join(config.Cfg.OutputDir, bucketDir)
+	// 加 userID 子目录，避免多用户同名文件互相覆盖
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		userID = "_shared"
+	}
+	dir := filepath.Join(config.Cfg.OutputDir, userID, bucketDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create output directory %s: %w", dir, err)
 	}
