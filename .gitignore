@@ -35,6 +35,7 @@ skills/users/*
 scripts/build.sh
 scripts/client.sh
 scripts/publish.sh
+scripts/deploy.sh
 
 # Claude Code 工作目录
 .claude/
