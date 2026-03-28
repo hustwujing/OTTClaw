@@ -1,4 +1,6 @@
 {
   "avatar_url": "",
-  "initialized": false
+  "initialized": false,
+  "extra_fs_dirs": [""],
+  "service_base_url": ""
 }

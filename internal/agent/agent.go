@@ -507,7 +507,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			assistantText := stripThinkPrefix(textBuf.String())
 			// LLM 返回了空文字（无工具调用、无文字），补充 fallback 提示避免无声结束
 			if assistantText == "" {
-				assistantText = "（我已完成处理，但没有返回说明。如果结果不符合预期，请重新描述你的需求。）"
+				assistantText = "（我已完成处理。如果结果不符合预期，请重申你的要求，我会继续处理。）"
 				_ = writer.WriteText(assistantText)
 			}
 			// LLM 输出了无意义占位符（"..."、"[ok]"等）而非真正内容，

@@ -385,7 +385,7 @@ Sure, here is the generated image:
 | User private skills | `skills/users/<userid>/<skill_id>/` | Owner only, read/write |
 | Agent self-improving skills | `skills/users/<userid>/self-improving/skills/<skill_id>/` | Owner only, read/write |
 
-**Read priority** (`run_script` / `read_asset` / `read_reference` search in this order):
+**Read priority** (`run_script` / `read_script` / `read_asset` / `read_reference` search in this order):
 1. `skills/users/<userid>/<skill_id>/`
 2. `skills/users/<userid>/self-improving/skills/<skill_id>/`
 3. `skills/system/<skill_id>/`
@@ -409,9 +409,11 @@ User-crafted skills always override self-improving skills with the same `skill_i
 |--------|----------|------|
 | `load` | `skill_id` | Load the full content of a skill. **Must be called before executing any skill.** |
 | `run_script` | `skill_id`, `script_name` | Execute `script/<script_name>` in the skill directory (read priority: user → self-improving → system). Auto-selects interpreter by extension (.sh→bash, .py→python3, .js→node). 60s timeout. Optional `args` (string array). |
+| `read_script` | `skill_id`, `script_name` | Read the source content of `script/<script_name>` without executing it (read priority: user → self-improving → system). Useful for reviewing or editing existing scripts. |
 | `read_asset` | `skill_id`, `asset_name` | Read `assets/<asset_name>` from the skill directory (read priority: user → self-improving → system). |
 | `read_reference` | `skill_id`, `reference_name` | Read `references/<reference_name>` from the skill directory (read priority: user → self-improving → system). |
 | `write` | `skill_id`, `content` | Write a skill file to `skills/users/<userid>/<skill_id>/`. Omit `sub_path` to write `SKILL.md`; use `sub_path="script/foo.sh"` / `"assets/bar.json"` / `"references/baz.md"` for other files. `skill_id`: lowercase letters/digits/underscores only. **Must call `skill(action=reload)` after writing SKILL.md.** |
+| `delete` | `skill_id` | Delete a user-owned skill directory and auto-reload the store. Searches both `skills/users/<userid>/<skill_id>/` and `skills/users/<userid>/self-improving/skills/<skill_id>/`; deletes whichever exists. **System skills (`skills/system/`) cannot be deleted.** |
 | `reload` | — | Reload all skills to make newly written skills available immediately. |
 
 **Examples**:
@@ -422,6 +424,9 @@ User-crafted skills always override self-improving skills with the same `skill_i
 // Run a script in the skill's script/ directory
 {"action": "run_script", "skill_id": "data_export", "script_name": "export.py", "args": ["--format", "csv"]}
 
+// Read a script file's source without executing it
+{"action": "read_script", "skill_id": "data_export", "script_name": "export.py"}
+
 // Read a reference asset file
 {"action": "read_asset", "skill_id": "weekly_report", "asset_name": "template.md"}
 
@@ -431,6 +436,9 @@ User-crafted skills always override self-improving skills with the same `skill_i
 
 // Add a script to an existing skill
 {"action": "write", "skill_id": "my_skill", "content": "#!/bin/bash\necho hello", "sub_path": "script/run.sh"}
+
+// Delete a user-owned skill (auto-reloads store)
+{"action": "delete", "skill_id": "my_skill"}
 ```
 
 ---

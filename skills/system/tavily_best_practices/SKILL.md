@@ -46,9 +46,9 @@ Load on-demand when deeper API details are needed:
 
 | Topic | Reference |
 |-------|-----------|
-| SDK init, async, Hybrid RAG | `skill(action=read_reference, skill_id=tavily_best_practices, reference_name=sdk.md)` |
-| search() params, filtering, post-processing | `skill(action=read_reference, ..., reference_name=search.md)` |
-| extract() one-step vs two-step, query/chunks | `skill(action=read_reference, ..., reference_name=extract.md)` |
-| crawl() & map() instructions, Map+Extract | `skill(action=read_reference, ..., reference_name=crawl.md)` |
-| research() prompting, models, streaming | `skill(action=read_reference, ..., reference_name=research.md)` |
-| LangChain, CrewAI, Vercel AI SDK integrations | `skill(action=read_reference, ..., reference_name=integrations.md)` |
+| SDK init, async, Hybrid RAG | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/sdk.md")` |
+| search() params, filtering, post-processing | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/search.md")` |
+| extract() one-step vs two-step, query/chunks | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/extract.md")` |
+| crawl() & map() instructions, Map+Extract | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/crawl.md")` |
+| research() prompting, models, streaming | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/research.md")` |
+| LangChain, CrewAI, Vercel AI SDK integrations | `skill(action=read_file, skill_id=tavily_best_practices, sub_path="references/integrations.md")` |

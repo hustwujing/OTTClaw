@@ -1,7 +1,3 @@
-# Unzip Assistant
-
-A general-purpose extraction tool that supports multiple archive formats and returns a file list after extraction for subsequent processing.
-
 ==============================
 skill_id: unzip_file
 name: Unzip Assistant
@@ -11,62 +7,30 @@ trigger: Triggered when the user uploads an archive and says "help me unzip", "e
 enable: true
 ==============================
 
-## Execution Flow
+## Steps
 
-### 1. Identify the Archive File
+### 1. Identify Archive
 
-Extract the uploaded archive path from the user's message (format: `[File: uploads/xxx/filename.zip]`).
+Extract path from user message (`[File: uploads/xxx/filename.zip]`). Supported: `.zip` `.tar` `.tar.gz` `.tgz` `.rar` `.7z`. If unsupported format, ask for a supported archive.
 
-Supported formats:
-- `.zip`
-- `.tar`
-- `.tar.gz` / `.tgz`
-- `.rar`
-- `.7z`
-
-If the user has not uploaded a file or the file format is not supported, politely inform the user to upload a supported archive format.
-
-### 2. Run the Extraction Script
-
-Call `skill(action=run_script)` to execute `script/unzip.py`:
+### 2. Run Extraction
 
 ```
 skill(action=run_script, skill_id="unzip_file", script_name="unzip.py", args=[archive_path])
 ```
 
-The script extracts to `output/{bucket}/{name}_unzipped/` and outputs JSON: `{"output_dir": "...", "files": [...]}`.
+Extracts to `output/{bucket}/{name}_unzipped/`. Returns JSON: `{"output_dir": "...", "files": [...]}`.
 
-### 3. Store the Result in KV
-
-Store result in KV:
+### 3. Store in KV
 
 ```
-kv(action=set, key="unzip.result", value={
-  "source": "original archive path",
-  "output_dir": "extraction directory path",
-  "files": ["file1 path", "file2 path", ...]
-})
+kv(action=set, key="unzip.result", value={"source": ..., "output_dir": ..., "files": [...]})
 ```
 
-### 4. Return the Result to the User
+### 4. Report
 
-Display: success message, extraction directory, file list (max 20, show total count).
+Show extraction directory and file list (max 20, with total count). Note KV key for downstream skills.
 
-Example output:
-```
-Extraction complete!
+## Errors
 
-Extraction directory: output/A/myfiles_unzipped/
-15 files in total:
-  - document.pdf
-  - images/photo1.jpg
-  - images/photo2.jpg
-  - ...
-
-The file list has been stored in KV (key: unzip.result) and is available for subsequent skills.
-```
-
-## Error Handling
-
-- If the archive is corrupted or the format is not supported, inform the user of the specific error
-- If an extraction tool is not installed (e.g., unrar, 7z), advise the user to install the corresponding tool
+Show specific error for corrupted/unsupported archives. If tool missing (unrar, 7z), advise user to install it.

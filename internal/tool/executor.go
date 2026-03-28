@@ -9,7 +9,7 @@
 //   - read_image        : 按需读取图片并返回多模态内容（本轮 in-memory，不写 DB）
 //   - notify            : UI 通知统一入口（action=progress/options/confirm/upload，合并自 send_progress/send_options/send_confirm/send_file_upload）
 //     progress/upload 纯 UI，不写 DB；options/confirm 写 DB，下轮上下文可见
-//   - skill             : 技能操作统一入口（action=load/run_script/read_asset/read_reference/write/reload，合并自 get_skill_content/run_script/read_asset/write_skill_file/reload_skills）
+//   - skill             : 技能操作统一入口（action=load/run_script/read_file/write/delete/reload，合并自 get_skill_content/run_script/read_asset/write_skill_file/reload_skills）
 //   - kv                : 会话 KV 统一入口（action=get/set/append，合并自 kv_get/kv_set/kv_append）
 //   - fs                : 文件系统统一入口（action=list/stat/read/write/delete/move/mkdir，合并自 7 个 fs_* 工具）
 //   - tool_request      : 工具需求统一入口（action=request/list/close，合并自 3 个工具）
@@ -275,15 +275,13 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "skill",
-				Description: "Skill operations. action: load (load full content, required before executing any skill) / run_script (execute script/) / read_asset (read assets/) / read_reference (read references/) / write (create SKILL.md or script/assets/references file, then call reload) / reload (activate new skills). Call get_tool_doc(\"skill\") for details.",
+				Description: "Skill operations. action: load (read full SKILL.md; required before running) / run_script / read_file / write (SKILL.md or sub_path file) / delete / reload. Call get_tool_doc(\"skill\") for details.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"action":         map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_asset", "read_reference", "write", "reload"}},
+						"action":         map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_file", "write", "delete", "reload"}},
 						"skill_id":       map[string]any{"type": "string"},
 						"script_name":    map[string]any{"type": "string"},
-						"asset_name":     map[string]any{"type": "string"},
-						"reference_name": map[string]any{"type": "string"},
 						"sub_path":       map[string]any{"type": "string"},
 						"content":        map[string]any{"type": "string"},
 						"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -386,7 +384,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "exec",
-				Description: "Execute a shell command (bash -c). Returns output or session_id for long-running commands. Do NOT use to read/search code or docs (no cat/sed/grep/find on source files) — use code_search instead. For simple git lookups (log/show/diff/blame/status with basic options), prefer code_search(action=git); use exec for git commands that need shell features (date arithmetic, author filters, pipes, custom formats, multi-command chains). For commands that produce no output (mkdir, chmod, cp, mv, git add, touch, etc.), append \"; echo '[cmd:exit=$?]'\" so the result is never empty. Call get_tool_doc(\"exec\") for advanced params (env, timeout_sec, yield_ms, background).",
+				Description: "Execute a shell command (bash -c). Use code_search for reading/searching source files; use code_search(action=git) for simple git lookups. Append \"; echo '[cmd:exit=$?]'\" to commands that produce no output. Call get_tool_doc(\"exec\") for advanced params.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -474,7 +472,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "browser",
-				Description: "Headless Chromium browser automation. MUST call get_tool_doc(\"browser\") before use for full params and login-handling protocol. Key rules: (1) snapshot=read page content, NEVER screenshot for that; (2) if login/verification detected, do NOT screenshot — use notify(options) to ask if server runs locally; if yes: close → launch(visible=true) → navigate to login page → wait for user → close visible browser → launch() headless → navigate to task URL → continue task. CRITICAL: visible browser is for login ONLY — never perform task work in it; always close and relaunch headless before continuing. visible=true only valid on launch.",
+				Description: "Headless Chromium automation. Use snapshot to read page content (never screenshot for that). Call get_tool_doc(\"browser\") before use for full params and the login-handling protocol.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},
@@ -532,7 +530,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "code_search",
-				Description: "Explore codebase & docs. Choose action by task:\n• tree — understand project layout\n• glob — find files by name pattern (supports **)\n• grep — find where a symbol/string appears (regex)\n• outline — get file structure (funcs/types/headings) without reading full content\n• chunk_read — read large files in chunks (default 80 lines each); result shows remaining chunks — keep calling with chunk=2,3,… until done\n• git — trace code history; requires git_action param: log/blame/diff/show/status/branch/tag\n• ast_grep — match code by AST structure using $VAR patterns (needs ast-grep)\n• comby — match code by delimiter-balanced templates using :[VAR] (needs comby, language-agnostic)\nCall get_tool_doc(\"code_search\") for full parameter docs.",
+				Description: "Explore codebase & docs: tree / glob / grep / outline / chunk_read / git / ast_grep / comby. Call get_tool_doc(\"code_search\") for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},
@@ -955,11 +953,13 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, cmdArgs[0], cmdArgs[1:]...)
-	cmd.Dir = skillDir // 工作目录设为技能根目录
-	// 注入 session / user 上下文，脚本可用 os.environ["SKILL_SESSION_ID"] 构造隔离的 /tmp 子目录
+	// 工作目录设为项目根目录（skills/ 的父目录），使相对路径 uploads/、output/ 等可直接访问
+	cmd.Dir = filepath.Dir(skill.Store.GetBaseDir())
+	// 注入 session / user / skill 上下文
 	cmd.Env = append(os.Environ(),
 		"SKILL_SESSION_ID="+sessionIDFromCtx(ctx),
 		"SKILL_USER_ID="+userIDFromCtx(ctx),
+		"SKILL_DIR="+skillDir, // 技能根目录，脚本如需访问自身目录下的文件可用此变量
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -980,22 +980,27 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// handleReadAsset 读取技能 assets/ 目录下的参考文件，返回文件内容字符串
+// handleReadSkillFile 读取技能根目录下任意子路径的文件内容，与 handleWriteSkillFile 对称。
 //
-// 安全约束：文件路径严格限制在 {skill_root}/assets/ 目录内，拒绝路径穿越
-func handleReadAsset(ctx context.Context, argsJSON string) (string, error) {
+// 参数：
+//   - skill_id: 技能唯一标识
+//   - sub_path:  相对于技能根目录的路径，例如 "extras/config.yaml"、"data/schema.json"
+//     （如需读取 SKILL.md 本身，使用 action=load；script/assets/references 有各自专用 action）
+//
+// 安全约束：路径不得穿越出技能根目录
+func handleReadSkillFile(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		SkillID   string `json:"skill_id"`
-		AssetName string `json:"asset_name"`
+		SkillID string `json:"skill_id"`
+		SubPath string `json:"sub_path"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("parse read_asset args: %w", err)
+		return "", fmt.Errorf("parse read_file args: %w", err)
 	}
 	if args.SkillID == "" {
 		return "", fmt.Errorf("skill_id is required")
 	}
-	if args.AssetName == "" {
-		return "", fmt.Errorf("asset_name is required")
+	if args.SubPath == "" {
+		return "", fmt.Errorf("sub_path is required")
 	}
 
 	skillDir, ok := skill.Store.GetSkillDir(userIDFromCtx(ctx), args.SkillID)
@@ -1009,86 +1014,27 @@ func handleReadAsset(ctx context.Context, argsJSON string) (string, error) {
 			filepath.Join(baseDir, "system", args.SkillID))
 	}
 
-	// 构造并校验资产绝对路径，防止路径穿越
-	assetsDir := filepath.Join(skillDir, "assets")
-	assetPath := filepath.Clean(filepath.Join(assetsDir, args.AssetName))
-
-	absAssetsDir, err := filepath.Abs(assetsDir)
+	absSkillDir, err := filepath.Abs(skillDir)
 	if err != nil {
-		return "", fmt.Errorf("resolve assets dir: %w", err)
-	}
-	absAssetPath, err := filepath.Abs(assetPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve asset path: %w", err)
-	}
-	if !strings.HasPrefix(absAssetPath, absAssetsDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("asset path escapes skill assets directory")
+		return "", fmt.Errorf("resolve skill dir: %w", err)
 	}
 
-	data, err := os.ReadFile(absAssetPath)
+	targetPath := filepath.Clean(filepath.Join(absSkillDir, args.SubPath))
+	absTargetPath, err := filepath.Abs(targetPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve target path: %w", err)
+	}
+	if !strings.HasPrefix(absTargetPath, absSkillDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("sub_path escapes skill directory")
+	}
+
+	data, err := os.ReadFile(absTargetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("asset %q not found in skill %q (searched: %s)", args.AssetName, args.SkillID, absAssetPath)
+			return "", fmt.Errorf("file %q not found in skill %q (searched: %s)", args.SubPath, args.SkillID, absTargetPath)
 		}
-		return "", fmt.Errorf("read asset %q: %w", args.AssetName, err)
+		return "", fmt.Errorf("read file %q: %w", args.SubPath, err)
 	}
-
-	return string(data), nil
-}
-
-// handleReadReference 读取技能 references/ 目录下的参考文件，返回文件内容字符串
-//
-// 安全约束：文件路径严格限制在 {skill_root}/references/ 目录内，拒绝路径穿越
-func handleReadReference(ctx context.Context, argsJSON string) (string, error) {
-	var args struct {
-		SkillID       string `json:"skill_id"`
-		ReferenceName string `json:"reference_name"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("parse read_reference args: %w", err)
-	}
-	if args.SkillID == "" {
-		return "", fmt.Errorf("skill_id is required")
-	}
-	if args.ReferenceName == "" {
-		return "", fmt.Errorf("reference_name is required")
-	}
-
-	skillDir, ok := skill.Store.GetSkillDir(userIDFromCtx(ctx), args.SkillID)
-	if !ok {
-		baseDir := skill.Store.GetBaseDir()
-		uid := userIDFromCtx(ctx)
-		return "", fmt.Errorf("skill %q not found; searched:\n  1. %s\n  2. %s\n  3. %s",
-			args.SkillID,
-			filepath.Join(baseDir, "users", uid, "self-improving", "skills", args.SkillID),
-			filepath.Join(baseDir, "users", uid, args.SkillID),
-			filepath.Join(baseDir, "system", args.SkillID))
-	}
-
-	// 构造并校验参考文件绝对路径，防止路径穿越
-	referencesDir := filepath.Join(skillDir, "references")
-	refPath := filepath.Clean(filepath.Join(referencesDir, args.ReferenceName))
-
-	absReferencesDir, err := filepath.Abs(referencesDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve references dir: %w", err)
-	}
-	absRefPath, err := filepath.Abs(refPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve reference path: %w", err)
-	}
-	if !strings.HasPrefix(absRefPath, absReferencesDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("reference path escapes skill references directory")
-	}
-
-	data, err := os.ReadFile(absRefPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("reference %q not found in skill %q (searched: %s)", args.ReferenceName, args.SkillID, absRefPath)
-		}
-		return "", fmt.Errorf("read reference %q: %w", args.ReferenceName, err)
-	}
-
 	return string(data), nil
 }
 
@@ -1269,13 +1215,14 @@ func resolveSkillBaseDir(userID string) string {
 //   - content: 文件内容
 //   - sub_path（可选）: 相对于技能根目录的路径：
 //   - 省略 → 写入 SKILL.md（默认行为）
-//   - "script/foo.sh"       → 写入 script/ 目录
-//   - "assets/bar.json"     → 写入 assets/ 目录（资产文件）
-//   - "references/baz.md"   → 写入 references/ 目录（参考文件）
+//   - "script/foo.sh"         → 写入 script/ 目录
+//   - "assets/bar.json"       → 写入 assets/ 目录
+//   - "references/baz.md"     → 写入 references/ 目录
+//   - "extras/config.yaml"    → 写入任意自定义子目录（如导入第三方技能包时的原始结构）
 //
 // 安全约束：
 //   - skill_id 只允许小写字母、数字、下划线（防止路径注入）
-//   - sub_path 仅允许 script/、assets/ 或 references/ 前缀，防止路径穿越
+//   - sub_path 不得穿越出技能根目录（路径穿越检查）
 //   - 写入 SKILL.md 时不允许覆盖已存在的技能
 func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
@@ -1323,7 +1270,7 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 	if args.SubPath == "" {
 		parsed, err := skill.ParseContent(args.Content)
 		if err != nil {
-			return "", fmt.Errorf("SKILL.md 格式错误：%w\n提示：请先调用 skill(action=read_asset, skill_id=skill_creator, asset_name=skill_template.md) 获取标准格式模板，再重新写入", err)
+			return "", fmt.Errorf("SKILL.md 格式错误：%w\n提示：请先调用 skill(action=read_file, skill_id=skill_creator, sub_path=\"assets/skill_template.md\") 获取标准格式模板，再重新写入", err)
 		}
 		if parsed.SkillID != args.SkillID {
 			return "", fmt.Errorf("内容中的 skill_id=%q 与参数 skill_id=%q 不一致，请保持一致", parsed.SkillID, args.SkillID)
@@ -1344,15 +1291,6 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 			return fmt.Sprintf("skill %q updated (SKILL.md overwritten)", args.SkillID), nil
 		}
 		return fmt.Sprintf("SKILL.md written to %s", mdPath), nil
-	}
-
-	// 有 sub_path → 只允许 script/、assets/ 或 references/ 前缀
-	if !strings.HasPrefix(args.SubPath, "script/") && !strings.HasPrefix(args.SubPath, "assets/") && !strings.HasPrefix(args.SubPath, "references/") {
-		hint := ""
-		if args.SubPath == "SKILL.md" || strings.EqualFold(args.SubPath, "skill.md") {
-			hint = " (to write SKILL.md, omit sub_path entirely)"
-		}
-		return "", fmt.Errorf("sub_path must start with \"script/\", \"assets/\", or \"references/\", got: %q%s", args.SubPath, hint)
 	}
 
 	// 辅助文件写入时，优先使用技能在 store 中的实际 RootPath。
@@ -1388,150 +1326,6 @@ func handleWriteSkillFile(ctx context.Context, argsJSON string) (string, error) 
 	return fmt.Sprintf("file written to %s", absTargetPath), nil
 }
 
-// handleWriteSkillScript 在技能的 script/ 目录下创建或更新脚本文件。
-//
-// 安全约束：
-//   - skill_id 只允许小写字母、数字、下划线
-//   - script_name 严格限制在 {skill_root}/script/ 目录内，拒绝路径穿越
-func handleWriteSkillScript(ctx context.Context, argsJSON string) (string, error) {
-	var args struct {
-		SkillID    string `json:"skill_id"`
-		ScriptName string `json:"script_name"`
-		Content    string `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("parse write_skill_script args: %w", err)
-	}
-	if args.SkillID == "" {
-		return "", fmt.Errorf("skill_id is required")
-	}
-	if args.ScriptName == "" {
-		return "", fmt.Errorf("script_name is required")
-	}
-	if args.Content == "" {
-		return "", fmt.Errorf("content is required")
-	}
-	if !skillIDRegex.MatchString(args.SkillID) {
-		return "", fmt.Errorf("skill_id %q is invalid: only lowercase letters, digits, and underscores are allowed", args.SkillID)
-	}
-
-	userID := userIDFromCtx(ctx)
-	if userID == "" {
-		return "", fmt.Errorf("user_id not found in context")
-	}
-	skillsBaseDir := resolveSkillBaseDir(userID)
-	if skillsBaseDir == "" {
-		return "", fmt.Errorf("skills directory not initialized")
-	}
-
-	absBaseDir, err := filepath.Abs(skillsBaseDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve skills base dir: %w", err)
-	}
-
-	absSkillDir := filepath.Join(absBaseDir, args.SkillID)
-	if actualSkillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
-		if abs, err := filepath.Abs(actualSkillDir); err == nil {
-			absSkillDir = abs
-		}
-	}
-
-	scriptDir := filepath.Join(absSkillDir, "script")
-	scriptPath := filepath.Clean(filepath.Join(scriptDir, args.ScriptName))
-
-	absScriptDir, err := filepath.Abs(scriptDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve script dir: %w", err)
-	}
-	absScriptPath, err := filepath.Abs(scriptPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve script path: %w", err)
-	}
-	if !strings.HasPrefix(absScriptPath, absScriptDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("script_name escapes script directory")
-	}
-
-	if err := os.MkdirAll(absScriptDir, 0o755); err != nil {
-		return "", fmt.Errorf("create script directory: %w", err)
-	}
-	if err := os.WriteFile(absScriptPath, []byte(args.Content), 0o644); err != nil {
-		return "", fmt.Errorf("write script file: %w", err)
-	}
-	return fmt.Sprintf("script written to %s", absScriptPath), nil
-}
-
-// handleWriteSkillAsset 在技能的 assets/ 目录下创建或更新参考文件。
-//
-// 安全约束：
-//   - skill_id 只允许小写字母、数字、下划线
-//   - asset_name 严格限制在 {skill_root}/assets/ 目录内，拒绝路径穿越
-func handleWriteSkillAsset(ctx context.Context, argsJSON string) (string, error) {
-	var args struct {
-		SkillID   string `json:"skill_id"`
-		AssetName string `json:"asset_name"`
-		Content   string `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("parse write_skill_asset args: %w", err)
-	}
-	if args.SkillID == "" {
-		return "", fmt.Errorf("skill_id is required")
-	}
-	if args.AssetName == "" {
-		return "", fmt.Errorf("asset_name is required")
-	}
-	if args.Content == "" {
-		return "", fmt.Errorf("content is required")
-	}
-	if !skillIDRegex.MatchString(args.SkillID) {
-		return "", fmt.Errorf("skill_id %q is invalid: only lowercase letters, digits, and underscores are allowed", args.SkillID)
-	}
-
-	userID := userIDFromCtx(ctx)
-	if userID == "" {
-		return "", fmt.Errorf("user_id not found in context")
-	}
-	skillsBaseDir := resolveSkillBaseDir(userID)
-	if skillsBaseDir == "" {
-		return "", fmt.Errorf("skills directory not initialized")
-	}
-
-	absBaseDir, err := filepath.Abs(skillsBaseDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve skills base dir: %w", err)
-	}
-
-	absSkillDir := filepath.Join(absBaseDir, args.SkillID)
-	if actualSkillDir, ok := skill.Store.GetSkillDir(userID, args.SkillID); ok {
-		if abs, err := filepath.Abs(actualSkillDir); err == nil {
-			absSkillDir = abs
-		}
-	}
-
-	assetsDir := filepath.Join(absSkillDir, "assets")
-	assetPath := filepath.Clean(filepath.Join(assetsDir, args.AssetName))
-
-	absAssetsDir, err := filepath.Abs(assetsDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve assets dir: %w", err)
-	}
-	absAssetPath, err := filepath.Abs(assetPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve asset path: %w", err)
-	}
-	if !strings.HasPrefix(absAssetPath, absAssetsDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("asset_name escapes assets directory")
-	}
-
-	if err := os.MkdirAll(absAssetsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create assets directory: %w", err)
-	}
-	if err := os.WriteFile(absAssetPath, []byte(args.Content), 0o644); err != nil {
-		return "", fmt.Errorf("write asset file: %w", err)
-	}
-	return fmt.Sprintf("asset written to %s", absAssetPath), nil
-}
-
 // handleReloadSkills 重新扫描 skills 目录，原子替换 Store 中的 map，并同步工具需求状态。
 // 新增技能文件后立即调用此工具可使新技能生效，无需重启服务。
 func (e *Executor) handleReloadSkills(_ context.Context, _ string) (string, error) {
@@ -1544,9 +1338,96 @@ func (e *Executor) handleReloadSkills(_ context.Context, _ string) (string, erro
 	return "ok", nil
 }
 
+// handleDeleteSkill 删除用户自有技能目录（及其所有子文件）并热更新 Store。
+//
+// 允许删除的路径（两处均会检查，存在的全部删除）：
+//   - skills/users/{userid}/{skillid}/                        （用户手工技能）
+//   - skills/users/{userid}/self-improving/skills/{skillid}/  （自进化技能）
+//
+// 安全约束：
+//   - skill_id 只允许小写字母、数字、下划线，防止路径注入
+//   - 严格校验最终路径在允许前缀内，防止路径穿越
+//   - skills/system/ 始终只读，无论如何不允许删除
+func (e *Executor) handleDeleteSkill(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		SkillID string `json:"skill_id"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", fmt.Errorf("parse delete args: %w", err)
+	}
+	if args.SkillID == "" {
+		return "", fmt.Errorf("skill_id is required")
+	}
+	if !skillIDRegex.MatchString(args.SkillID) {
+		return "", fmt.Errorf("skill_id %q is invalid: only lowercase letters, digits, and underscores are allowed", args.SkillID)
+	}
+
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		return "", fmt.Errorf("user_id not found in context")
+	}
+
+	baseDir := skill.Store.GetBaseDir()
+	if baseDir == "" {
+		return "", fmt.Errorf("skills directory not initialized")
+	}
+
+	// 两个允许的候选根目录
+	absUserBase, err := filepath.Abs(filepath.Join(baseDir, "users", userID))
+	if err != nil {
+		return "", fmt.Errorf("resolve user skills dir: %w", err)
+	}
+	absSIBase, err := filepath.Abs(filepath.Join(baseDir, "users", userID, "self-improving", "skills"))
+	if err != nil {
+		return "", fmt.Errorf("resolve self-improving skills dir: %w", err)
+	}
+
+	candidateUser := filepath.Clean(filepath.Join(absUserBase, args.SkillID))
+	candidateSI := filepath.Clean(filepath.Join(absSIBase, args.SkillID))
+
+	// 路径穿越校验
+	if !strings.HasPrefix(candidateUser, absUserBase+string(filepath.Separator)) {
+		return "", fmt.Errorf("skill_id escapes user skills directory")
+	}
+	if !strings.HasPrefix(candidateSI, absSIBase+string(filepath.Separator)) {
+		return "", fmt.Errorf("skill_id escapes self-improving skills directory")
+	}
+
+	// 额外防护：user 路径不得落入 self-improving 子目录（skill_id 含连字符时理论上不可能，但防御性保留）
+	siMarker := filepath.Join(absUserBase, "self-improving")
+	if strings.HasPrefix(candidateUser, siMarker+string(filepath.Separator)) || candidateUser == siMarker {
+		return "", fmt.Errorf("cannot delete via user path when target is inside self-improving; skill_id resolved to a self-improving subdirectory")
+	}
+
+	var deleted []string
+	for _, candidate := range []string{candidateUser, candidateSI} {
+		if _, statErr := os.Stat(candidate); os.IsNotExist(statErr) {
+			continue
+		}
+		if removeErr := os.RemoveAll(candidate); removeErr != nil {
+			return "", fmt.Errorf("delete skill directory %q: %w", candidate, removeErr)
+		}
+		deleted = append(deleted, candidate)
+	}
+
+	if len(deleted) == 0 {
+		return "", fmt.Errorf("skill %q not found for user %q (searched:\n  1. %s\n  2. %s)",
+			args.SkillID, userID, candidateUser, candidateSI)
+	}
+
+	if reloadErr := skill.Store.Reload(); reloadErr != nil {
+		return "", fmt.Errorf("skill deleted but reload failed: %w", reloadErr)
+	}
+	if syncErr := e.SyncToolRequests(); syncErr != nil {
+		return "", fmt.Errorf("skill deleted but sync tool requests failed: %w", syncErr)
+	}
+
+	return fmt.Sprintf("skill %q deleted (%d location(s) removed) and store reloaded", args.SkillID, len(deleted)), nil
+}
+
 // handleSkill 通过 action 字段分发，替代 5 个独立工具：
 // get_skill_content / run_script / read_asset / read_reference / write_skill_file / reload_skills
-// action: load / run_script / read_asset / read_reference / write / reload
+// action: load / run_script / read_file / write / delete / reload
 func (e *Executor) handleSkill(ctx context.Context, argsJSON string) (string, error) {
 	var base struct {
 		Action string `json:"action"`
@@ -1559,16 +1440,16 @@ func (e *Executor) handleSkill(ctx context.Context, argsJSON string) (string, er
 		return handleGetSkillContent(ctx, argsJSON)
 	case "run_script":
 		return handleRunScript(ctx, argsJSON)
-	case "read_asset":
-		return handleReadAsset(ctx, argsJSON)
-	case "read_reference":
-		return handleReadReference(ctx, argsJSON)
+	case "read_file":
+		return handleReadSkillFile(ctx, argsJSON)
 	case "write":
 		return handleWriteSkillFile(ctx, argsJSON)
+	case "delete":
+		return e.handleDeleteSkill(ctx, argsJSON)
 	case "reload":
 		return e.handleReloadSkills(ctx, argsJSON)
 	default:
-		return "", fmt.Errorf("unknown skill action: %q (valid: load/run_script/read_asset/read_reference/write/reload)", base.Action)
+		return "", fmt.Errorf("unknown skill action: %q (valid: load/run_script/read_file/write/delete/reload)", base.Action)
 	}
 }
 

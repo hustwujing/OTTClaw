@@ -115,6 +115,7 @@ func main() {
 	// 聊天前端页面：GET /
 	r.StaticFile("/", "client/index.html")
 	r.StaticFile("/favicon.ico", "client/favicon.ico")
+	r.StaticFile("/marked.min.js", "client/marked.min.js")
 
 	// 需要 JWT 鉴权的接口组
 	authed := r.Group("/")

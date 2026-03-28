@@ -7,20 +7,9 @@ description: Generates diagrams and data charts as PNG images. Uses Python matpl
 trigger: When the user wants to draw a flowchart, sequence diagram, ER diagram, class diagram, state diagram, Gantt chart, line chart, bar chart, pie chart, temperature curve, trend chart, data chart, or says "draw me a diagram", "draw a chart", "generate an image", "plot the data", "visualize", etc.
 ==============================
 
-## Skill Goal
+## Step 1: Choose Engine
 
-Choose the right engine, generate code, render as PNG, and auto-deliver.
-
----
-
-## Step 1: Choose Rendering Engine
-
-> **CRITICAL RULE — check this FIRST:**
->
-> - Does the chart involve **numbers / data values** (temperature, revenue, counts, percentages, time series)? → **MUST use matplotlib (Path B)**
-> - Is it a **structural / relationship diagram** (flowchart, sequence, ER, class, state, Gantt)? → Use Mermaid (Path A)
->
-> **NEVER use `xychart-beta` or any Mermaid chart type for data visualization.**
+**CRITICAL: numeric data (temperature, revenue, counts, time series) → matplotlib (Path B). Structural diagrams → Mermaid (Path A). NEVER use `xychart-beta` or Mermaid for data.**
 
 | Scenario | Engine |
 |----------|--------|
@@ -136,24 +125,14 @@ Then write HTML and screenshot — see Step A2.
 
 ---
 
-## Step 3: Brief Explanation
-
-After image is delivered, provide 2–4 sentences on: chart type choice, key insights, how to request changes.
-
----
-
 ## Output Format
 
-1. **Image** — auto-delivered
-2. **Code block** — Python or Mermaid (for reference)
-3. **Brief explanation + follow-up question**
-
-> **CRITICAL**: Never include `![alt](url)` in your reply — image already delivered.
-
----
+1. **Image** — auto-delivered (never embed `![alt](url)` in reply)
+2. **Code block** — Python or Mermaid
+3. **2–4 sentence explanation**: chart type, key insights, how to request changes
 
 ## Notes
 
-- **Never use `xychart-beta`** — broken; **never use Mermaid for numeric data** — use matplotlib
-- Must call `plt.rcParams['font.family']` before any plot; use `figsize=(10,5), dpi=120`
-- Pie charts: `ax.pie(...)`, omit xlabel/ylabel; bar charts: `ax.bar(...)`
+- Never use `xychart-beta`; never use Mermaid for numeric data.
+- Call `plt.rcParams['font.family']` before any plot; use `figsize=(10,5), dpi=120`.
+- Pie charts: `ax.pie(...)`, omit xlabel/ylabel; bar charts: `ax.bar(...)`.

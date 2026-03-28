@@ -44,6 +44,31 @@ func writableDirs() []string {
 	}
 }
 
+// isTmpPath 判断 abs 是否位于临时目录下。
+// 需要同时检查三种形式，兼容跨平台差异：
+//   - os.TempDir()：Linux 返回 /tmp，macOS 返回 /var/folders/...
+//   - 字面量 /tmp：macOS 上 os.TempDir() 不等于 /tmp，需单独处理
+//   - /tmp 的符号链接目标（macOS 上为 /private/tmp）：filepath.Abs 不解析符号链接，
+//     但 os.MkdirAll 等系统调用会解析，导致 abs 可能含真实路径
+func isTmpPath(abs string) bool {
+	// 1. os.TempDir()（Linux: /tmp；macOS: /var/folders/...）
+	if d := os.TempDir(); abs == d || strings.HasPrefix(abs, d+string(os.PathSeparator)) {
+		return true
+	}
+	// 2. 字面量 /tmp
+	const litTmp = "/tmp"
+	if abs == litTmp || strings.HasPrefix(abs, litTmp+string(os.PathSeparator)) {
+		return true
+	}
+	// 3. /tmp 的符号链接真实路径（macOS: /private/tmp）
+	if real, err := filepath.EvalSymlinks(litTmp); err == nil && real != litTmp {
+		if abs == real || strings.HasPrefix(abs, real+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkWritable 验证 path 在允许写入的目录下，防止路径穿越。
 // 规则：
 //   - 初始化阶段（initialized=false）：不限制目录，允许写入任意项目内路径
@@ -63,8 +88,7 @@ func checkWritable(path, userID string) error {
 	}
 
 	// /tmp 目录：允许写入（脚本临时文件）
-	tmpDir := os.TempDir()
-	if abs == tmpDir || strings.HasPrefix(abs, tmpDir+string(os.PathSeparator)) {
+	if isTmpPath(abs) {
 		return nil
 	}
 
@@ -131,8 +155,7 @@ func checkInProject(path string) error {
 	}
 
 	// 允许：/tmp 目录（脚本临时文件）
-	tmpDir := os.TempDir()
-	if abs == tmpDir || strings.HasPrefix(abs, tmpDir+string(os.PathSeparator)) {
+	if isTmpPath(abs) {
 		return nil
 	}
 
