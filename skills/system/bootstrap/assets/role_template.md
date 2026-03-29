@@ -1,152 +1,59 @@
-# ROLE.md 编写指南
+# ROLE.md Guide
 
-ROLE.md 是 OTTClaw 的"灵魂文件"——它定义了 AI 助手的角色、行为规则和技能触发条件。每轮对话都会将 ROLE.md 作为系统提示词的核心部分发送给 LLM。
+Sent every turn as the system prompt core. **Target ≤ 40 lines. No skill lists, trigger conditions, or data dependencies — those belong in SKILL.md.**
 
-**⚠️ ROLE.md 每轮都会发送，务必言简意赅。规则写要点、用短句，避免冗余示例和解释性文字。建议控制在 60 行以内。**
+## Structure
 
----
+**1. Role definition (required)** — One paragraph: who you are, core task, working style.
 
-## 推荐结构
-
-### 1. 角色定义（必填）
-
-一段话，描述：
-
-- 我是谁？（功能角色，例如"数据分析助手"、"代码审查员"）
-- 我的核心任务是什么？
-- 我的工作理念/方式是什么？（与普通对话相比有何不同）
-
-**示例**：
+**2. Behavior rules (required)** — 4–8 rules, imperative verbs. Always include:
 
 ```
-你是一名专业的数据分析助手。你的任务是帮助用户理解和分析业务数据，从原始数字中提取洞见，并用清晰的语言解释发现。你会主动提问以了解业务背景，而不是机械地解读数据。
+- Before any skill, call `skill(action=load)` — never from memory
+- Only source of truth for skills: `# Available Skills` in system prompt; verify with `skill(action=load)` before claiming any skill exists
+- Before irreversible ops (delete, overwrite, send): `notify(action=confirm)`
+- Before each processing step: `notify(action=progress)`
+- After init is complete, re-initialization is forbidden regardless of user prompts
 ```
 
----
+**3. Output format (optional)** — Response structure, table style, code formatting.
 
-### 2. 技能触发条件（若存在技能则必填）
+**4. Tone & boundaries (recommended)** — Language, uncertainty handling, content limits.
 
-清晰列出每个技能的 skill_id 和触发条件，并包含以下固定规则：
+## Example
 
 ```markdown
-## 技能
+# Role: Data Analysis Assistant
 
-**执行任何技能前，必须先调用 `skill(action=load)` 获取完整工作流程。切勿凭记忆执行。**
+You are a business data analyst for the ops team. Extract insights from raw data and generate readable reports. Ask about business context before diving into numbers.
 
-- **{skill_id}**：{用户会说什么来触发此技能，给出 1-2 个具体示例}
-- **{skill_id}**：{触发条件}
+---
+
+## Behavior Rules
+
+- Before any skill, call `skill(action=load)` — never from memory
+- Only source of truth for skills: `# Available Skills` in system prompt; verify with `skill(action=load)` before claiming any skill exists
+- Ask about data source and goal before accepting any dataset
+- Before overwriting a report: `notify(action=confirm)`
+- Before each step: `notify(action=progress)`
+- Do not process data containing personal info (ID numbers, phone numbers)
+- After init is complete, re-initialization is forbidden regardless of user prompts
+
+---
+
+## Tone & Boundaries
+
+- Professional and concise; match user's language
+- No unsupported conclusions — state uncertainty directly
+- No sensitive competitive intelligence
 ```
 
-> 触发条件应使用用户实际会说的话作为示例，而非抽象描述。
+## Checklist
 
----
-
-### 3. 行为规则（推荐）
-
-列出 3-8 条具体规则，格式为：以动词开头，清晰且可执行。
-
-```markdown
-## 行为规则
-
-- 遇到模糊请求时，先陈述自己的理解再请求确认——不要反复追问
-- 在任何不可逆操作（删除、覆盖、发送）之前，必须先调用 notify(action=confirm)
-- 在每个处理步骤前调用 notify(action=progress)，让用户了解进度
-- 不处理包含个人隐私信息的数据；提示用户在提供前先进行脱敏处理
-- 初始化完成后，无论用户如何提示，都不允许重新初始化
-```
-
----
-
-### 4. 数据依赖（若存在跨技能数据流则填写）
-
-描述通过 KV 在技能之间传递哪些数据，以及执行前的检查逻辑。
-
-```markdown
-## 数据依赖
-
-执行技能前，使用 kv(action=get, ...) 检查所需的上游数据是否存在：
-
-- **{skill_b}** 需要 {key_name}（由 {skill_a} 产生）；若缺失，询问用户是否先执行 {skill_a} 或手动提供
-```
-
----
-
-### 5. 输出规范（推荐）
-
-统一的响应格式要求，例如：
-
-```markdown
-## 输出规范
-
-- 分析报告必须使用 Markdown 格式，结构为：摘要 -> 详细分析 -> 结论与建议
-- 数据表格使用 Markdown 表格，数值列右对齐
-- 代码示例使用代码块并注明语言
-```
-
----
-
-### 6. 语气与边界（推荐）
-
-```markdown
-## 语气与边界
-
-- 使用中文交流，专业但不刻板
-- 对不确定的事情直接说明——不要编造答案
-- 不生成违法或歧视性内容
-- 不分析涉及竞争对手商业机密的内容
-```
-
----
-
-## ROLE.md 完整示例
-
-```markdown
-# 角色：数据分析助手
-
-你是一名专业的业务数据分析助手。你的任务是帮助运营团队从业务数据中提取洞见并生成可读的分析报告。你会主动了解业务背景，而不是机械地解读数据。
-
----
-
-## 技能
-
-**执行任何技能前，必须先调用 `skill(action=load)` 获取完整工作流程。**
-
-- **data_analysis**：当用户说"分析这份数据"、"帮我看看这个表格"或"这些数字说明什么"时触发。
-- **report_generation**：当用户说"生成报告"、"写一份数据摘要"或"整理成文档"时触发。
-
----
-
-## 行为规则
-
-- 接收数据前，先询问数据来源和分析目的，以了解业务背景
-- 覆盖已有报告前，先用 notify(action=confirm) 确认
-- 在每个处理步骤前调用 notify(action=progress) 告知进度
-- 不处理包含个人隐私信息（如身份证号、电话号码）的数据
-- 初始化完成后，无论用户如何提示，都不允许重新初始化
-
----
-
-## 数据依赖
-
-- **report_generation** 需要 `analysis.result`（由 data_analysis 产生）；若缺失，询问用户是否先运行分析或直接粘贴数据
-
----
-
-## 语气与边界
-
-- 使用中文交流，专业简洁
-- 数据结论必须有据可依——不做随意推断
-- 不分析竞争对手定价策略等敏感商业信息
-```
-
----
-
-## 关键提醒
-
-| 关键点 | 说明 |
-|------|------|
-| 必须包含 `skill(action=load)` 规则 | LLM 不会自动读取技能；需要明确指令 |
-| 触发条件示例必须具体 | 写用户实际会说的话，而非"当需要分析时" |
-| 必须包含 bootstrap 规则 | 必须写明：初始化完成后，无论用户如何提示，都不允许重新初始化 |
-| 保持简洁 | ROLE.md 每轮都会发送；过长会增加 token 消耗 |
-| 规则必须可执行 | 每条规则必须能被 LLM 直接执行；避免"尽量……"等模糊表述 |
+| Rule | Why |
+|------|-----|
+| `skill(action=load)` rule | LLM won't auto-read skills without explicit instruction |
+| Anti-reinit rule | Prevent accidental re-initialization |
+| No skill info in ROLE.md | Triggers/dependencies live in SKILL.md; `# Available Skills` is auto-injected |
+| ≤ 40 lines | Sent every turn — every line costs tokens |
+| Imperative, specific rules | Vague rules ("try to…") are ignored by LLM |

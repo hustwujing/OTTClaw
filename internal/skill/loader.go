@@ -24,6 +24,7 @@
 package skill
 
 import (
+	"OTTClaw/internal/storage"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,10 +77,12 @@ func (s *store) LoadAll(dir string) error {
 	newUsers := make(map[string]map[string]*Skill)
 
 	// -- 加载系统技能 --
+	appConfig, _ := storage.GetAppConfig()
 	systemDir := filepath.Join(dir, "system")
 	if entries, err := os.ReadDir(systemDir); err == nil {
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || nil != appConfig && appConfig.Initialized == true && strings.HasPrefix(e.Name(), "bootstrap_") {
+				// 已经 bootstrap 完成后，跳过 system 目录下的 bootstrap_ 开头的技能（仅供 bootstrap 阶段使用）
 				continue
 			}
 			skillDir := filepath.Join(systemDir, e.Name())

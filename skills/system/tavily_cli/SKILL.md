@@ -2,7 +2,7 @@
 skill_id: tavily_cli
 name: Tavily CLI
 display_name: 网络搜索与研究
-enable: true
+enable: false
 description: Web search, content extraction, site crawling, URL discovery, and AI deep research via the tvly CLI. Returns LLM-optimized JSON.
 trigger: When the user wants to search the web, extract URL content, crawl docs, discover site URLs, or conduct deep research with citations.
 requires_bins: tvly

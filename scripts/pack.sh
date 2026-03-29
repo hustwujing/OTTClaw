@@ -72,8 +72,8 @@ done
 # ── 3. 清理垃圾文件 ──────────────────────────────────────────
 find "$STAGE" -name '.DS_Store' -delete 2>/dev/null || true
 find "$STAGE" -name '*.test' -delete 2>/dev/null || true
-rm -rf "$STAGE/.claude"
-rm -rf "$STAGE/scripts/.claude"
+find "$STAGE" -type d -name '.claude' -exec rm -rf {} + 2>/dev/null || true
+find "$STAGE" -type d -name '.claude-plugin' -exec rm -rf {} + 2>/dev/null || true
 
 # ── 4. 打包 ──────────────────────────────────────────────────
 (cd "$TMPDIR" && zip -r -q "$OUT" "$PROJECT" -x "*/.DS_Store" "*/node_modules/*")

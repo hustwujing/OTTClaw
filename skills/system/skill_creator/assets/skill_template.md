@@ -111,14 +111,26 @@
 import json
 import os
 import sys
+import tempfile
 
 
-# /tmp 仅用于会话内步骤间的临时中转文件（session 结束后自然消亡）。
-# 使用 SKILL_SESSION_ID 构造独占子目录，避免多用户并发时互相覆盖：
-#   work_dir = os.path.join("/tmp", os.environ.get("SKILL_SESSION_ID", "default"))
-#   os.makedirs(work_dir, exist_ok=True)
-# 需要持久保存的文件请写入 output/{SKILL_USER_ID}/ 并将路径 print 到 stdout，
+# ── 临时目录（需要步骤间中转文件时使用，否则删除）──────────────────────
+# tempfile.gettempdir() 跨平台兼容（macOS /tmp、Linux /tmp、Windows %TEMP%）
+# realpath 解析软链接（macOS /tmp -> /private/tmp）
+# SKILL_SESSION_ID 保证多用户并发隔离
+_TMP_ROOT = os.path.realpath(tempfile.gettempdir())
+
+def _get_work_dir(skill_id):
+    # type: (str) -> str
+    session_id = os.environ.get("SKILL_SESSION_ID", "default")
+    path = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, session_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+# 用法：work_dir = _get_work_dir("my_skill_id")
+# 持久文件：写入 output/{SKILL_USER_ID}/ 并将路径 print 到 stdout，
 # 由 LLM 调用 output_file(action=download) 生成下载链接。
+# ─────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:

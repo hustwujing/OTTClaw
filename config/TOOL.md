@@ -589,9 +589,9 @@ Cross-session persistence. Three targets:
 
 ## Usage Guidelines
 1. **notify(progress)**: Proactively push progress on waits and multi-step ops.
-2. **Stop after interactive tools**: After notify(options/confirm) or send_file_upload, stop — wait for user reply next turn.
+2. **Stop after interactive tools**: After notify(options/confirm/upload), stop — wait for user reply next turn.
 3. **notify(confirm) before irreversible ops** (delete, send, submit).
-4. **skill execution flow**: Always call `skill(action=load)` first → read the returned SKILL.md content and available file listing → follow the steps as written → only call `run_script`/`read_asset`/`read_reference` when the loaded SKILL.md explicitly directs it. Never invoke these actions without loading first.
+4. **skill execution flow**: Always call `skill(action=load)` first → read the returned SKILL.md content and available file listing → follow the steps as written → only call `skill(action=run_script/read_file`) when the loaded SKILL.md explicitly directs it. Never invoke these actions without loading first.
 5. **kv vs memory(user_kv)**: `kv` is session-scoped — use for inter-step scratch within one session. `memory(target=user_kv)` persists across sessions — use for user-level business data. Never use `kv` for data that must survive session close.
 6. **On tool error**: explain to user.
 7. **skill(reload) after skill(write)**: must call immediately after; otherwise new skill won't load.

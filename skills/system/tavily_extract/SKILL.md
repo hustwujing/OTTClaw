@@ -2,7 +2,7 @@
 skill_id: tavily_extract
 name: Tavily Extract
 display_name: 网页内容提取
-enable: true
+enable: false
 description: Extracts clean markdown/text from URLs via tvly CLI. Handles JS-rendered pages. Supports query-focused chunking. Max 20 URLs per call.
 trigger: When the user has URLs and wants their content, says "提取", "抓取页面", "extract", "grab the content from", "read this webpage".
 requires_bins: tvly

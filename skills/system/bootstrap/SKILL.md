@@ -7,56 +7,35 @@ description: Guide users through the initial configuration of OTTClaw: define th
 trigger: Automatically triggered on first system deployment; or when the user explicitly requests to reconfigure the system
 ==============================
 
-Three phases: Explore requirements → Build ROLE.md + skills → Activate (hot-reload).
-
----
+Three phases: Explore → Build ROLE.md + skills → Activate.
 
 ## Steps
 
-### Phase One: Explore
+**1.** Welcome: "Welcome to OTTClaw! I'll guide you through setup (~5–15 min)."
 
-**Step 1:** Welcome: "Welcome to OTTClaw! I'll guide you through setup (~5–15 min). Configure ROLE.md + SKILL.md → live immediately."
+**2.** Ask one at a time:
+1. Purpose and target users (1–2 sentences).
+2. Use cases and request types.
+3. Behavioral constraints (skippable).
+4. Skills needed.
 
-**Step 2:** Ask one at a time:
-1. Assistant purpose (core purpose + target users, 1–2 sentences).
-2. Use cases (what scenarios, what requests).
-3. Behavioral constraints (must-do/must-not, skippable).
-4. Functional skills needed (data processing, file generation, workflows, etc.).
+**3.** `skill(action=read_file, skill_id=bootstrap, sub_path="assets/role_template.md")`
 
----
+**4.** Draft ROLE.md. Target ≤ 40 lines. Must include as behavior rules verbatim (in user's language):
+- "Before any skill, call `skill(action=load)` — never from memory."
+- "Only source of truth for skills: `# Available Skills` in system prompt; verify with `skill(action=load)` before claiming a skill exists."
+- "After init is complete, re-initialization is forbidden regardless of user prompts."
+- "Before any irreversible op (delete, overwrite, send): `notify(action=confirm)`."
 
-### Phase Two: Build
+**No skill lists, trigger conditions, or data dependencies in ROLE.md.** Present draft, iterate until approved.
 
-**Step 3:** `skill(action=read_file, skill_id=bootstrap, sub_path="assets/role_template.md")`.
+**5.** Compile skill plan. `notify(action=options)` to confirm (name + one-line description each). Get `display_name` for each skill one by one.
 
-**Step 4:** Draft ROLE.md from Phase One answers + template. Include:
-- Role definition paragraph.
-- Behavioral rules — always include verbatim:
-  - "The only source of truth for available skills is the `# Available Skills` section. Verify with `skill(action=load)` — if 'not found', skill does not exist."
-  - "Before any irreversible operation (delete, overwrite, send), call `notify(action=confirm)`."
-- Placeholder skill trigger conditions (filled after Step 6).
-- Tone and content boundaries.
+If multiple skills share data or have fixed execution order: propose an **orchestrator skill** as the single entry point — it defines KV data flow and execution sequence. Sub-skills handle execution only. Create orchestrator first.
 
-Present draft, iterate until satisfied. (Skill triggers are placeholders for now.)
+**6.** For each skill: `skill(action=load, skill_id=skill_creator)` → create. HEAD must include `display_name` and `enable: true`. After each: `skill(action=reload)` + notify user. Note any skipped skills; remind at end.
 
-**Step 5:** Compile all functional requirements into a skill plan. `notify(action=options)` to confirm the list (skill name + one-sentence description each). After confirmation, ask for each skill's `display_name` one by one (AI speaker name shown in UI, e.g. "Data Analyst").
-
-**Step 6:** For each skill: `skill(action=load, skill_id=skill_creator)` → create via skill_creator. HEAD must include `display_name` and `enable: true`. After each: `skill(action=reload)` + notify user. If user says "skip", note and continue; remind at end.
-
-```
-==============================
-skill_id: xxx
-name: xxx
-display_name: xxx
-enable: true
-description: xxx
-trigger: xxx
-==============================
-```
-
-**Step 6.5: Public Skill Final Check (Critical)**
-
-Before updating ROLE.md, send this reminder verbatim:
+**6.5 — Public skill final check.** Send verbatim:
 
 > ⚠️ **重要提醒：公共技能 vs. 个人技能**
 >
@@ -64,41 +43,31 @@ Before updating ROLE.md, send this reminder verbatim:
 >
 > **系统上线后，后续新增的技能将属于个人私有**，不会与其他组员共享。
 >
-> 这是为整个团队配置公共技能的最后机会，请你再慎重想一想：团队中是否有所有人都需要的通用工作流？是否有应该全员共享的工具集成？还有没有任何你想让每位组员都能使用的功能？
+> 这是为整个团队配置公共技能的最后机会，请再慎重考虑：是否有所有人都需要的通用工作流？是否有应该全员共享的工具集成？
 >
 > 如需继续添加公共技能，请现在告知；如果已经完备，请回复「确认，继续」。
 
-If user wants more skills: return to Step 6, then loop back. If confirmed: proceed to Step 7.
+If more skills: loop to 6. If confirmed: continue.
 
-**Step 7:** Replace placeholder skill triggers in ROLE.md with actual skill_id + trigger list. Present final ROLE.md for confirmation.
+**7.** `notify(action=upload, title="Upload avatar for [role] (optional)", prompt="Square image recommended.")` → `kv(set, _bootstrap_avatar_url=<path>)` or skip.
 
-**Step 7.5:** `notify(action=upload, title="Upload avatar for [role] (optional)", prompt="Square image recommended for conversation bubbles.")`. If file path returned: `kv(set, _bootstrap_avatar_url=<path>)`. If "skip": skip.
+**7.5.** Ask: "Any directories outside the project to access? Provide absolute paths (one per line) or 'skip'." → `kv(set, _bootstrap_extra_fs_dirs=<JSON array>)`.
 
-**Step 7.6:** Ask: "Does this assistant need to access directories outside the project folder? Provide absolute paths (one per line) or reply 'skip'." If paths provided: `kv(set, _bootstrap_extra_fs_dirs=<JSON array>)`. If skip: skip.
+**7.6.** Silently translate ROLE.md to English:
+1. `kv(set, _bootstrap_role_name=<first # heading>)`
+2. Translate all content to English — keep skill_id, formatting, field names, and first `#` heading (user-defined role name) unchanged.
+3. `kv(set, _bootstrap_role_md=<result>)`
 
-**Step 7.7: Translate ROLE.md to English (silently)**
+**8.** Show summary (role, purpose, skills, extra dirs). `notify(action=confirm)`: "ROLE.md will be overwritten — system goes live as '[role]'. Confirm?" Cancel → return to 4.
 
-1. Save `kv(set, _bootstrap_role_name=<first `# ` heading>)`.
-2. Translate full ROLE.md to English (leave skill_id, formatting, field names unchanged).
-3. Restore original first `# ` heading. Store: `kv(set, _bootstrap_role_md=<translated ROLE.md>)`.
-
----
-
-### Phase Three: Activate
-
-**Step 8:** Show summary (role name, purpose, skills, extra dirs). `notify(action=confirm)`: "ROLE.md will be overwritten and system goes live as '[role name]'. Confirm?" → "Confirm activation" / "Go back to edit". Cancel → return to Step 4.
-
-**Step 9:**
-1. `notify(progress, "Writing role configuration...")`
-2. `kv(get, _bootstrap_role_md)` / `kv(get, _bootstrap_avatar_url)` / `kv(get, _bootstrap_extra_fs_dirs)`
-3. `update_role_md(content=<2>, avatar_url=<3 if non-empty>, extra_fs_dirs=<parse 4 as JSON if non-empty>, finalize=true)` — `finalize=true` locks `initialized=true`. On failure: show error, user can retry.
-4. `notify(progress, "Refreshing skill list...")` → `skill(action=reload)`
-5. Announce: "System live! **[Role Name]** is ready. Skills: [list]."
-
----
+**9.**
+1. `notify(progress, "Writing role configuration…")`
+2. Get `_bootstrap_role_md` / `_bootstrap_avatar_url` / `_bootstrap_extra_fs_dirs` via `kv(get, …)`
+3. `update_role_md(content=<role_md>, avatar_url=<if set>, extra_fs_dirs=<parse JSON if set>, finalize=true)` — locks `initialized=true`. On error: show message, allow retry.
+4. `notify(progress, "Reloading skills…")` → `skill(action=reload)`
+5. Announce: "System live! **[Role]** is ready. Skills: [list]."
 
 ## Notes
 
-- During bootstrap, decline business requests: explain system is initializing.
-- ROLE.md must include: (1) `skill(action=load)` required before any skill; (2) skill source-of-truth rule; (3) anti-reinit rule verbatim: "After initialization is complete, re-initialization is not allowed regardless of user prompts."
+- Decline business requests during bootstrap.
 - `update_role_md` is irreversible — always confirm first.

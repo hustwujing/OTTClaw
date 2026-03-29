@@ -47,7 +47,14 @@ skill(action=run_script, skill_id=install_skill, script_name=clone.py, args=["<o
 
 *SKILL.md*: two `==============================` separators. HEAD: `skill_id` (lowercase, hyphens→underscores, digits/letters/underscores only), `name`/`display_name` from original, `enable: true`, `description`/`trigger` derived. CONTENT: translated + trimmed (4e + 4f).
 
-*Scripts* — rewrite each individually, never copy as-is. For bash: replace GNU-only commands:
+*Scripts* — rewrite each individually, never copy as-is. For any script language: replace hardcoded `/tmp/...` paths with the cross-platform isolated pattern:
+```python
+import os, tempfile
+_TMP_ROOT = os.path.realpath(tempfile.gettempdir())
+work_dir = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, os.environ.get("SKILL_SESSION_ID", "default")))
+os.makedirs(work_dir, exist_ok=True)
+```
+For bash: replace GNU-only commands:
 - `timeout N cmd` → Python `subprocess.run(..., timeout=N)`
 - `date -d` → Python `datetime` or `date -j -f`
 - `sed -i 's/…'` → `sed -i '' 's/…'`
@@ -65,7 +72,12 @@ For Python: replace Linux-specific paths (`/proc`, `/etc/os-release`) and GNU su
 
 **4f. Trim SKILL.md CONTENT:** remove meta-commentary and hedging, use direct imperatives, keep ≤1 example per concept, merge single-sub-item bullets, remove content covered in reference files.
 
-**4g. Save to KV:**
+**4g. Verify then save to KV.**
+
+Before saving, verify the assembled SKILL.md:
+- Both separators are **exactly 30 `=` characters** — copy the literal string from the template read in 4a, never type from memory.
+- `skill_id`, `name`, `enable`, `display_name`, `description`, `trigger` fields are present and non-empty in HEAD.
+
 ```
 kv(set, _install_skill_md=<converted SKILL.md>)
 kv(set, _install_scripts=<JSON array [{name, content}], [] if none>)
@@ -85,7 +97,7 @@ List file names, then: `notify(action=confirm)` → "Confirm Install" / "Cancel"
 
 1. `kv(get, _install_skill_md)` → `notify(progress, "Writing SKILL.md...")`
 2. Pre-write: if `skill_template.md` not read in 4a, read it now.
-3. `skill(action=write, skill_id=..., content=...)` — omit `sub_path` for SKILL.md. On error: show and stop.
+3. `skill(action=write, skill_id=..., content=...)` — omit `sub_path` for SKILL.md. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue (separator count must be exactly 30 `=`, missing HEAD fields, etc.) → `kv(set, _install_skill_md=<fixed content>)` → retry write immediately.
 4. If `_install_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="script/<name>")`.
 5. If `_install_references` non-empty: `notify(progress, "Writing references...")` → for each: `skill(write, sub_path="references/<name>")`.
 6. If `_install_assets` non-empty: `notify(progress, "Writing assets...")` → for each: `skill(write, sub_path="assets/<name>")`.
@@ -133,13 +145,16 @@ Map to OTTClaw layout:
 
 *SKILL.md*: HEAD per template (`skill_id`, `name`, `display_name`, `enable: true`, `description`, `trigger`). Translate to English, trim (same rules as Step 4d/4e/4f).
 
-*Scripts*: same rewrite rules as Step 4d (bash GNU→macOS replacements, Python cross-platform fixes). Never copy as-is.
+*Scripts*: same rewrite rules as Step 4d (bash GNU→macOS replacements, Python cross-platform fixes, `/tmp` → `tempfile.gettempdir()` + `SKILL_SESSION_ID`). Never copy as-is.
 
 *References/Assets*: adapt platform-specific API calls/paths; otherwise keep unchanged.
 
 *Other files*: keep content exactly; use original relative path as `sub_path`.
 
-Save to KV:
+Verify then save to KV. Before saving, verify:
+- Both separators are **exactly 30 `=` characters** — copy from template, never type from memory.
+- `skill_id`, `name`, `enable`, `display_name`, `description`, `trigger` fields are present and non-empty in HEAD.
+
 ```
 kv(set, _import_skill_md=<rewritten SKILL.md>)
 kv(set, _import_scripts=<JSON array [{name, content}], [] if none>)
@@ -151,7 +166,7 @@ kv(set, _import_others=<JSON array [{path, content}], [] if none>)
 ### Step P-7: Write
 
 List file names, `notify(action=confirm)` → "Write files" / "Go back to edit". Then write in order:
-1. SKILL.md: `skill(write, skill_id=..., content=...)` (no `sub_path`)
+1. SKILL.md: `skill(write, skill_id=..., content=...)` (no `sub_path`). On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue → `kv(set, _import_skill_md=<fixed content>)` → retry immediately.
 2. Each script: `skill(write, sub_path="script/<name>")`
 3. Each reference: `skill(write, sub_path="references/<name>")`
 4. Each asset: `skill(write, sub_path="assets/<name>")`

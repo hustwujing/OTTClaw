@@ -38,6 +38,7 @@ scripts/publish.sh
 
 # Claude Code 工作目录
 .claude/
+.claude-plugin/
 
 # macOS
 .DS_Store

@@ -2,7 +2,7 @@
 skill_id: tavily_research
 name: Tavily Research
 display_name: AI 深度研究
-enable: true
+enable: false
 description: AI-powered deep research via tvly CLI. Gathers sources, analyzes, and produces cited reports. Takes 30-120s. For quick facts use tavily_search instead.
 trigger: When the user needs deep research, comparisons, market analysis, literature review, or says "research", "调研", "深入分析", "对比分析".
 requires_bins: tvly

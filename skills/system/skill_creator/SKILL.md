@@ -106,6 +106,10 @@ Translate: SKILL.md HEAD (`name`, `display_name`, `description`, `trigger`), SKI
 
 Rewrite SKILL.md CONTENT only: remove meta-commentary, use direct imperatives, remove hedging, keep ≤1 example per concept, merge single-sub-item bullets, remove duplicated content. Do not trim scripts, references, or assets.
 
+Before saving, verify the assembled SKILL.md:
+- Both separators are **exactly 30 `=` characters** — copy the literal string from the template read in Step Zero, never type from memory.
+- `skill_id`, `name`, `enable`, `display_name`, `description`, `trigger` fields are present and non-empty in HEAD.
+
 Save to KV and proceed to Step Five:
 
 ```
@@ -135,7 +139,7 @@ On "Go Back and Edit": return to Step Four, re-save KV, call confirm again.
 
 1. `kv(get, _draft_skill_md)` → `notify(progress, "Writing SKILL.md...")`
 2. Pre-write: if `skill_template.md` not read in Step Zero, read it now.
-3. `skill(action=write, skill_id=..., content=...)` — validates format automatically. On error: show and return to Step Four. Writes to `skills/users/<userid>/<skill_id>/` (`skills/system/` is read-only).
+3. `skill(action=write, skill_id=..., content=...)` — validates format automatically. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue reported (separator count, missing field, etc.) → `kv(set, _draft_skill_md=<fixed content>)` → retry write immediately. Return to Step Four only on repeated failure. Writes to `skills/users/<userid>/<skill_id>/` (`skills/system/` is read-only).
 4. If `_draft_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="script/<name>")`.
 5. If `_draft_references` non-empty: `notify(progress, "Writing references...")` → for each: `skill(write, sub_path="references/<name>")`.
 6. If `_draft_assets` non-empty: `notify(progress, "Writing assets...")` → for each: `skill(write, sub_path="assets/<name>")`.

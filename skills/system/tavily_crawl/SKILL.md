@@ -2,7 +2,7 @@
 skill_id: tavily_crawl
 name: Tavily Crawl
 display_name: 站点批量爬取
-enable: true
+enable: false
 description: Crawls websites and extracts content from multiple pages via tvly CLI. Supports depth/breadth control, path filtering, semantic instructions, and saving pages as local markdown files.
 trigger: When the user wants to crawl a site, download docs, bulk-extract pages, or says "crawl", "download the docs", "批量抓取", "爬取".
 requires_bins: tvly

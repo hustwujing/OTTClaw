@@ -277,7 +277,7 @@ if [ -d "\$DEP_DIR/skills" ]; then
       name="\$(basename "\$src")"
       case "\$name" in
         bootstrap|feishu_setup|find_skill|humanizer_zh|install_brew|install_git|\
-        install_nodejs|install_python|mermaid_diagram|skill_creator|summarize|\
+        install_nodejs|install_python|mermaid_diagram|skill_creator|install_skill|summarize|\
         tavily_best_practices|tavily_cli|tavily_crawl|tavily_extract|tavily_map|\
         tavily_research|tavily_search|unzip_file|wecom_setup)
           rm -rf "\$OTTCLAW_DIR/skills/system/\$name"

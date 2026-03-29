@@ -2,7 +2,7 @@
 skill_id: tavily_search
 name: Tavily Search
 display_name: 网络搜索
-enable: true
+enable: false
 description: Web search via tvly CLI returning LLM-optimized results with snippets, scores, and metadata. Supports domain filtering, time ranges, and multiple search depths.
 trigger: When the user wants to search the web, find articles, look up info, get recent news, or says "搜索", "查找", "最新的 X".
 requires_bins: tvly
