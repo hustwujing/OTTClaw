@@ -129,8 +129,8 @@ type AppConfig struct {
 	// read_file 文本提取大小上限
 	ReadFileMaxBytes int // READ_FILE_MAX_BYTES：read_file 从 .docx/.pdf/.pptx 提取文本的最大字节数；0 不限制，默认 20971520（20 MB）
 
-	// read_image 图片读取大小上限
-	ReadImageMaxBytes int // READ_IMAGE_MAX_BYTES：read_image 读取图片的最大字节数，超出自动缩放；0 不限制，默认 5242880（5 MB）
+	// read_file 图片读取大小上限（路由至图片处理器时生效）
+	ReadImageMaxBytes int // READ_IMAGE_MAX_BYTES：read_file 读取图片的最大字节数，超出自动缩放；0 不限制，默认 5242880（5 MB）
 
 	// MCP 外接能力
 	MCPConfigPath string // MCP_CONFIG_PATH：MCP server 配置文件路径，默认 config/mcp.json

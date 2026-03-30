@@ -55,7 +55,7 @@ func Upload(c *gin.Context) {
 		return
 	}
 
-	// 图片文件额外限制：与 read_image 的处理上限保持一致（READ_IMAGE_MAX_BYTES）
+	// 图片文件额外限制：与 read_file 图片处理上限保持一致（READ_IMAGE_MAX_BYTES）
 	imageExts := map[string]bool{
 		".jpg": true, ".jpeg": true, ".png": true,
 		".gif": true, ".webp": true, ".bmp": true,

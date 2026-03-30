@@ -6,7 +6,7 @@
 // internal/tool/executor.go — 工具注册与执行
 //
 // 内置工具（合并后）：
-//   - read_image        : 按需读取图片并返回多模态内容（本轮 in-memory，不写 DB）
+//   - read_file         : 统一文件读取入口（合并自 read_file/read_pdf/read_image），按扩展名自动路由
 //   - notify            : UI 通知统一入口（action=progress/options/confirm/upload，合并自 send_progress/send_options/send_confirm/send_file_upload）
 //     progress/upload 纯 UI，不写 DB；options/confirm 写 DB，下轮上下文可见
 //   - skill             : 技能操作统一入口（action=load/run_script/read_file/write/delete/reload，合并自 get_skill_content/run_script/read_asset/write_skill_file/reload_skills）
@@ -137,7 +137,7 @@ func sessionIDFromCtx(ctx context.Context) string {
 
 type userIDCtxKey struct{}
 
-// WithUserID 将当前 userID 注入 context，供 get_current_user 工具读取
+// WithUserID 将当前 userID 注入 context，供 get_session_info 工具读取
 func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDCtxKey{}, userID)
 }
@@ -164,9 +164,9 @@ func New() *Executor {
 	e.register("skill", e.handleSkill) // 合并自 get_skill_content / run_script / read_asset / write_skill_file / reload_skills
 	e.register("kv", handleKv)         // 合并自 kv_get / kv_set / kv_append
 	e.register("update_role_md", handleUpdateRoleMD)
-	e.register("get_current_user", handleGetCurrentUser)
-	e.register("read_file", handleReadFile)
-	e.register("fs", handleFs)                      // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
+	e.register("get_session_info", handleGetSessionInfo)
+	e.register("read_file", handleReadFile) // 合并自 read_file / read_pdf / read_image（按扩展名路由）
+	e.register("fs", handleFs)              // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
 	e.register("tool_request", e.handleToolRequest) // 合并自 request_tool / list_tool_requests / close_tool_request
 	e.register("output_file", handleOutputFile)     // 合并自 write_output_file / serve_file_download
 	e.register("exec", handleExec)
@@ -176,12 +176,10 @@ func New() *Executor {
 	e.register("wecom", handleWecom)   // 合并自 wecom_send / get_wecom_config / set_wecom_config
 	e.register("browser", handleBrowser)
 	e.register("web_fetch", handleWebFetch)
-	e.register("read_pdf", handleReadPDF)
 	e.register("code_search", handleCodeSearch)
 	e.register("cron", handleCron)
 	e.register("nano_banana", handleNanoBanana)
 	e.register("get_tool_doc", handleGetToolDoc)
-	e.register("read_image", handleReadImage)
 	e.register("mcp", handleMCP)
 	if config.Cfg.MemoryEnabled {
 		e.register("memory", handleMemory)
@@ -309,8 +307,8 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_current_user",
-				Description: "Return the current logged-in user's user_id.",
+				Name:        "get_session_info",
+				Description: "Return current context: user_id, session_id, session_source (web/feishu), session_title, and parent_session_id (if in a continuation session).",
 				Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 			},
 		},
@@ -318,11 +316,13 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "read_file",
-				Description: "Extract text from .docx/.pptx/.xlsx in uploads/ or /tmp. For PDF use read_pdf.",
+				Description: "Read any uploaded file. .docx/.pptx/.xlsx → text; .pdf → page-by-page text (pages=\"1-5\" to select range, render=true for scanned docs); .jpg/.png/.gif/.webp → visual analysis.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"path": map[string]any{"type": "string", "description": "File path (uploads/ or /tmp)"},
+						"path":   map[string]any{"type": "string", "description": "File path (uploads/, output/, or /tmp)"},
+						"pages":  map[string]any{"type": "string", "description": "PDF only: page range e.g. \"1-5\" or \"1,3,7-10\" (omit for all pages)"},
+						"render": map[string]any{"type": "boolean", "description": "PDF only: render pages as images for scanned documents"},
 					},
 					"required": []string{"path"},
 				},
@@ -364,7 +364,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "fs",
-				Description: "File system ops. For code/doc files prefer code_search (outline/chunk_read/grep) over read. action: list / stat / read (images→multimodal; text max 512KB) / write (uploads/output/skills//tmp/extra_fs_dirs) / delete / move / mkdir.",
+				Description: "File system ops inside sandbox. action: list / stat / read (images→multimodal; text max 512KB) / write / delete / move / mkdir. Call get_tool_doc(\"fs\") for path restrictions and parameter details.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -504,31 +504,6 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "read_pdf",
-				Description: "Extract PDF text page by page. Supports page range (pages=\"1-5\") and image rendering (render=true for scanned documents).",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "PDF path (uploads/, output/, or /tmp)",
-						},
-						"pages": map[string]any{
-							"type":        "string",
-							"description": "Page range e.g. 1-5 or 1,3,7-10 (omit for all)",
-						},
-						"render": map[string]any{
-							"type":        "boolean",
-							"description": "Render pages as images (for scanned docs)",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
 				Name:        "code_search",
 				Description: "Explore codebase & docs: tree / glob / grep / outline / chunk_read / git / ast_grep / comby. Call get_tool_doc(\"code_search\") for full parameter docs.",
 				Parameters: map[string]any{
@@ -576,23 +551,6 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 						},
 					},
 					"required": []string{"name"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "read_image",
-				Description: "View an image for visual analysis. History images stored as [file: path]; find path before calling.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Image file path",
-						},
-					},
-					"required": []string{"path"},
 				},
 			},
 		},
@@ -1499,13 +1457,38 @@ func handleUpdateRoleMD(ctx context.Context, argsJSON string) (string, error) {
 	return "系统角色信息已写入并热加载，新角色从下一轮对话起正式生效", nil
 }
 
-// handleGetCurrentUser 返回当前登录用户的 user_id。
-func handleGetCurrentUser(ctx context.Context, _ string) (string, error) {
+// handleGetSessionInfo 返回当前会话的完整上下文信息：
+// user_id、session_id、session_source、session_title、parent_session_id（非空时）。
+func handleGetSessionInfo(ctx context.Context, _ string) (string, error) {
 	uid := userIDFromCtx(ctx)
 	if uid == "" {
 		return "", fmt.Errorf("user_id not available in context")
 	}
-	return uid, nil
+	sid := sessionIDFromCtx(ctx)
+
+	result := map[string]any{
+		"user_id":    uid,
+		"session_id": sid,
+	}
+
+	// 从 DB 补充 Session 维度的信息；失败时降级，不阻塞工具调用
+	if sid != "" {
+		if sess, err := storage.GetSession(sid); err == nil && sess != nil {
+			result["session_source"] = sess.Source
+			if sess.Title != "" {
+				result["session_title"] = sess.Title
+			}
+			if sess.ParentSessionID != "" {
+				result["parent_session_id"] = sess.ParentSessionID
+			}
+		}
+	}
+
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("marshal result: %w", err)
+	}
+	return string(b), nil
 }
 
 // handleRequestTool 记录 LLM 需要但尚未实现的工具到数据库。
@@ -1610,8 +1593,12 @@ func (e *Executor) handleToolRequest(ctx context.Context, argsJSON string) (stri
 	}
 }
 
-// handleReadFile 提取上传文件的文本内容（.docx / .pdf / .pptx / .xlsx）。
-func handleReadFile(_ context.Context, argsJSON string) (string, error) {
+// handleReadFile 统一文件读取入口（合并自 read_file / read_pdf / read_image）。
+// 根据扩展名自动路由：
+//   - .jpg/.jpeg/.png/.gif/.webp/.bmp → 多模态图片分析（handleReadImage）
+//   - .pdf                            → 分页 PDF 提取（handleReadPDF，支持 pages / render）
+//   - .docx/.pptx/.xlsx/.doc         → Office 文本提取（readUploadedFile）
+func handleReadFile(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Path string `json:"path"`
 	}
@@ -1621,14 +1608,22 @@ func handleReadFile(_ context.Context, argsJSON string) (string, error) {
 	if strings.TrimSpace(args.Path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	text, err := readUploadedFile(args.Path)
-	if err != nil {
-		return "", err
+
+	switch strings.ToLower(filepath.Ext(args.Path)) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp":
+		return handleReadImage(ctx, argsJSON)
+	case ".pdf":
+		return handleReadPDF(ctx, argsJSON)
+	default:
+		text, err := readUploadedFile(args.Path)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(text) == "" {
+			return "(文件中未提取到文本内容，可能是扫描件或加密文档)", nil
+		}
+		return text, nil
 	}
-	if strings.TrimSpace(text) == "" {
-		return "(文件中未提取到文本内容，可能是扫描件或加密文档)", nil
-	}
-	return text, nil
 }
 
 // handleGetToolDoc 按名称从 TOOL.md 中提取指定工具的详细文档

@@ -345,7 +345,7 @@ func handleReadPDF(_ context.Context, argsJSON string) (string, error) {
 	}
 	if emptyPages == len(results) && !args.Render {
 		output["hint"] = "All pages have no extractable text. This may be a scanned PDF. " +
-			"Try read_pdf with render=true to get page images, or use browser tool to open the PDF."
+			"Try read_file with render=true to get page images, or use browser tool to open the PDF."
 	}
 
 	b, err := json.Marshal(output)

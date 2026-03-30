@@ -130,6 +130,11 @@ def _get_work_dir(skill_id):
 # 用法：work_dir = _get_work_dir("my_skill_id")
 # 持久文件：写入 output/{SKILL_USER_ID}/ 并将路径 print 到 stdout，
 # 由 LLM 调用 output_file(action=download) 生成下载链接。
+#
+# ── LLM 直接执行（无脚本）时的隔离方案 ──────────────────────────────
+# 不经过 run_script 的纯 LLM 步骤无法读取环境变量，改为：
+#   1. 调用 get_session_info 获取 session_id
+#   2. 用 exec 创建隔离目录：/tmp/{skill_id}_{session_id}/
 # ─────────────────────────────────────────────────────────────────────
 
 

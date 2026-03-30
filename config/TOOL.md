@@ -514,6 +514,55 @@ User-crafted skills always override self-improving skills with the same `skill_i
 
 ---
 
+## fs
+
+**Purpose**: File system operations inside the project sandbox. Prefer `code_search` for reading code/doc files.
+
+**Action overview**:
+
+| action | Required params | Description |
+|--------|-----------------|-------------|
+| `list` | `path` | List directory contents |
+| `stat` | `path` | File/dir metadata (size, mtime, type) |
+| `read` | `path` | Read file; images → multimodal; text max 512 KB |
+| `write` | `path`, `content` | Write (or append) to file |
+| `delete` | `path` | Delete file or directory |
+| `move` | `src`, `dst` | Move/rename |
+| `mkdir` | `path` | Create directory (parents auto-created) |
+
+**Parameters**:
+- `action` (string, required): one of the actions above
+- `path` (string): target path — required for all actions except `move`
+- `content` (string): file content — required for `write`
+- `append` (boolean): `write` only — true to append instead of overwrite
+- `recursive` (boolean): `delete` only — true to delete non-empty directory
+- `src` / `dst` (string): `move` only — source and destination paths
+
+**Path restrictions**:
+
+| Directory | read | write/delete/move/mkdir |
+|-----------|------|------------------------|
+| `uploads/` | ✅ | ✅ |
+| `output/` | ✅ | ✅ |
+| `skills/users/{userID}/` | ✅ | ✅ (own user only) |
+| `/tmp/` | ✅ | ✅ |
+| `extra_fs_dirs` (configured) | ✅ | ✅ |
+| `skills/system/` | ✅ | ❌ always read-only |
+| `.env`, `*.db`, `data/` | ❌ blocked | ❌ blocked |
+
+**Examples**:
+```json
+{"action": "list", "path": "output/"}
+{"action": "read", "path": "uploads/3/report.txt"}
+{"action": "write", "path": "/tmp/my_skill_abc123/result.json", "content": "{\"ok\":true}"}
+{"action": "write", "path": "output/notes.md", "content": "more content\n", "append": true}
+{"action": "delete", "path": "/tmp/my_skill_abc123", "recursive": true}
+{"action": "move", "src": "output/draft.md", "dst": "output/final.md"}
+{"action": "mkdir", "path": "/tmp/my_skill_abc123"}
+```
+
+---
+
 ## mcp
 
 **Purpose**: Access external MCP (Model Context Protocol) servers. Provides a lazy-loading three-tier strategy: the system prompt only shows matched server summaries (tool names), and full schemas are fetched on demand.
@@ -587,6 +636,37 @@ Cross-session persistence. Three targets:
 
 ---
 
+## get_session_info
+
+**Purpose**: Return the current context identifiers. Call when you need `user_id` or `session_id` — typically to construct user-isolated paths or pass IDs to external systems.
+
+**No parameters required.**
+
+**Returns** (JSON object):
+
+| Field | Always present | Description |
+|-------|----------------|-------------|
+| `user_id` | ✅ | Current user identifier |
+| `session_id` | ✅ | Current session identifier |
+| `session_source` | ✅ | Channel: `web` or `feishu` |
+| `session_title` | only when set | AI-generated title of this session |
+| `parent_session_id` | only when set | Present in continuation sessions |
+
+**Primary use case — temp dir isolation in LLM-direct skills**:
+
+When a skill step runs without a script (LLM executes exec directly), always use `session_id`
+to construct a per-user isolated working path — never use a shared fixed path:
+
+```
+/tmp/{skill_id}_{session_id}/
+```
+
+> **Note**: Scripts invoked via `skill(action=run_script)` automatically receive
+> `SKILL_SESSION_ID` and `SKILL_USER_ID` as environment variables — no need to call
+> `get_session_info` from within scripts.
+
+---
+
 ## Usage Guidelines
 1. **notify(progress)**: Proactively push progress on waits and multi-step ops.
 2. **Stop after interactive tools**: After notify(options/confirm/upload), stop — wait for user reply next turn.
@@ -599,5 +679,6 @@ Cross-session persistence. Three targets:
 9. **output_file(write)**: persist generated files and return download_url; (download) only for pre-created files. Never output large content inline.
 10. **browser(close)**: always call after completing a browser task.
 11. **web_fetch first**: try before browser; use browser only when JS rendering is required.
-12. **Read Office/PDF**: read_file for .docx/.pptx/.xlsx; read_pdf for .pdf. Never exec/Python libs.
+12. **Read files**: use read_file for all types — .docx/.pptx/.xlsx (text), .pdf (add pages="1-5" to select range or render=true for scanned), images .jpg/.png/.gif/.webp (visual analysis). Never exec/Python libs.
 13. **Write Office/PDF**: output_file(write, filename="xxx.docx/xlsx/pptx/pdf") — server converts by extension. Never exec/Python libs.
+14. **Temp dir isolation**: In LLM-direct skill steps (no script), call `get_session_info` first and use `session_id` to build an isolated path: `/tmp/{skill_id}_{session_id}/`. Never use a hardcoded shared `/tmp/xxx` path.

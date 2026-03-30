@@ -814,14 +814,14 @@ func (a *Agent) initRun(userID, sessionID, userInput string) (*runState, error) 
 }
 
 // processToolResult 处理单个工具调用的原始结果：
-// 多模态工具（如 read_image）注入 Parts；图片工具自动推送 WriteImage；
+// 多模态工具（如 read_file 读图片）注入 Parts；图片工具自动推送 WriteImage；
 // 下载文件写入 origin_session_messages 供前端展示。
 // 返回供 in-memory 追加的 toolMsg 及待写入 DB 的 dbContent。
 func (a *Agent) processToolResult(userID, sessionID string, writer StreamWriter, tc llm.ToolCall, result string) (toolMsg llm.ChatMessage, dbContent string) {
 	toolMsg = llm.ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name}
 	dbContent = result
 	if parts, textSummary, webURL, ok := tool.DecodePartsResult(result); ok {
-		// 多模态工具结果（如 read_image）：in-memory 注入 Parts，DB 只存文字摘要
+		// 多模态工具结果（如 read_file 读图片）：in-memory 注入 Parts，DB 只存文字摘要
 		toolMsg.Parts = parts
 		toolMsg.Content = textSummary // 文字回退，供不支持多模态 tool result 的 provider
 		dbContent = textSummary
@@ -1527,8 +1527,7 @@ func buildFileHint(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".pdf":
-		// read_pdf 支持分页（pages="1-5"）和图片渲染（render=true，适合扫描件）
-		return fmt.Sprintf("[提示：文件较大，如需读取内容请调用 read_pdf(path=%q)；分页读取可加 pages 参数，扫描件可加 render=true]", path)
+		return fmt.Sprintf("[提示：文件较大，如需读取内容请调用 read_file(path=%q)；分页读取可加 pages 参数，扫描件可加 render=true]", path)
 	case ".docx":
 		return fmt.Sprintf("[提示：文件较大，如需读取 Word 文档内容请调用 read_file(path=%q)]", path)
 	case ".pptx":
@@ -1536,7 +1535,7 @@ func buildFileHint(path string) string {
 	case ".xlsx":
 		return fmt.Sprintf("[提示：文件较大，如需读取 Excel 表格内容请调用 read_file(path=%q)]", path)
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico":
-		return fmt.Sprintf("[提示：如需查看图片请调用 read_image(path=%q)]", path)
+		return fmt.Sprintf("[提示：如需查看图片请调用 read_file(path=%q)]", path)
 	case ".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".xml", ".html", ".htm":
 		return fmt.Sprintf("[提示：文件较大，如需读取文本内容请调用 fs(action=read, path=%q)]", path)
 	default:
@@ -1698,22 +1697,14 @@ func buildReFetchHint(toolName, argsJSON, sessionID, fullContent string) string 
 			ext := strings.ToLower(filepath.Ext(path))
 			switch ext {
 			case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp":
-				return fmt.Sprintf("[内容过大已省略] 获取图片内容请调用 read_image(path=%q)", path)
+				return fmt.Sprintf("[内容过大已省略] 获取图片内容请调用 read_file(path=%q)", path)
 			default:
 				return fmt.Sprintf("[内容过大已省略] 重新获取文件内容请调用 fs(action=read, path=%q)", path)
 			}
 		}
-	case "read_file":
+	case "read_file", "read_image", "read_pdf": // read_image / read_pdf 已合并入 read_file
 		if path != "" {
 			return fmt.Sprintf("[内容过大已省略] 重新获取文件内容请调用 read_file(path=%q)", path)
-		}
-	case "read_image":
-		if path != "" {
-			return fmt.Sprintf("[内容过大已省略] 重新获取图片请调用 read_image(path=%q)", path)
-		}
-	case "read_pdf":
-		if path != "" {
-			return fmt.Sprintf("[内容过大已省略] 重新获取 PDF 内容请调用 read_pdf(path=%q)", path)
 		}
 	}
 
@@ -1748,7 +1739,7 @@ func estimateTokens(messages []llm.ChatMessage) int {
 	for _, m := range messages {
 		chars := len(m.Content)
 		// tool 消息按 DB 截断上限计算（与历史加载时一致），
-		// 避免单次大文件读取（如 read_pdf）误触发上下文压缩。
+		// 避免单次大文件读取（如 read_file 读 PDF）误触发上下文压缩。
 		if m.Role == "tool" && maxToolBytes > 0 && chars > maxToolBytes {
 			chars = maxToolBytes
 		}
@@ -1911,7 +1902,7 @@ func sanitizeForSummary(messages []llm.ChatMessage) []llm.ChatMessage {
 // buildMessages 将 DB 历史消息 + 系统 prompt 转换为 LLM 所需的 []ChatMessage
 //
 // 图片策略：历史消息中的图片始终保留为占位符 [文件: path]，不做任何 base64 展开。
-// LLM 需要查看图片时，主动调用 read_image 工具，图片仅注入当轮 in-memory，不写 DB。
+// LLM 需要查看图片时，主动调用 read_file 工具，图片仅注入当轮 in-memory，不写 DB。
 func buildMessages(systemPrompt string, dbMsgs []storage.SessionMessage) []llm.ChatMessage {
 	msgs := make([]llm.ChatMessage, 0, len(dbMsgs)+1)
 

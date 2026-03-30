@@ -311,7 +311,7 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 
 	ext := strings.ToLower(filepath.Ext(args.Path))
 
-	// 图片文件：自动路由到 read_image，返回多模态结果供 LLM 视觉分析。
+	// 图片文件：自动路由到 handleReadImage，返回多模态结果供 LLM 视觉分析。
 	// argsJSON 含 path 字段，与 handleReadImage 期望的格式兼容（多余的 action 字段被忽略）。
 	if _, isImg := imgMediaTypes[ext]; isImg {
 		return handleReadImage(ctx, argsJSON)
@@ -322,7 +322,7 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 	case ".doc", ".docx", ".pptx":
 		return "", fmt.Errorf("office document (%s): use read_file(path) for text extraction", ext)
 	case ".pdf":
-		return "", fmt.Errorf("PDF file: use read_file(path) for quick text extraction, or read_pdf(path) for page-level control")
+		return "", fmt.Errorf("PDF file: use read_file(path) for text extraction; add pages=\"1-5\" for page range or render=true for scanned docs")
 	}
 
 	// 大小限制：超出则拒绝，避免大文件全量入内存和 token
@@ -331,7 +331,7 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("stat file: %w", err)
 	}
 	if max := config.Cfg.FsReadMaxBytes; max > 0 && info.Size() > int64(max) {
-		return "", fmt.Errorf("file too large (%d KB, limit %d KB); for images use read_image, for PDFs use read_pdf",
+		return "", fmt.Errorf("file too large (%d KB, limit %d KB); use read_file(path) for images, PDFs, and Office docs",
 			info.Size()/1024, max/1024)
 	}
 
@@ -344,7 +344,7 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 	// 检测到二进制时返回有用错误，避免乱码写入 DB 并污染上下文。
 	if bytes.IndexByte(b, 0) >= 0 {
 		mime := http.DetectContentType(b)
-		return "", fmt.Errorf("binary file (detected: %s); use read_image for images, read_file for .docx/.pdf/.pptx", mime)
+		return "", fmt.Errorf("binary file (detected: %s); use read_file for images (.jpg/.png/.gif/.webp), PDFs, and Office docs (.docx/.pptx/.xlsx)", mime)
 	}
 
 	return string(b), nil

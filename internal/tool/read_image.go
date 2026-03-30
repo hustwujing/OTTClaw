@@ -8,7 +8,7 @@
 // 设计思路：
 //
 //	会话历史中图片始终保留为占位符 [文件: path]，不自动展开 base64。
-//	LLM 需要查看图片时，主动调用 read_image，本轮 in-memory 注入 base64；
+//	LLM 需要查看图片时，通过 read_file 路由到此处，本轮 in-memory 注入 base64；
 //	工具结果不写入 DB（DB 只存文字摘要），下轮对话自动消失，避免历史 token 累积。
 package tool
 
