@@ -34,7 +34,7 @@ var mdImageRe = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
 // StreamWriter 与 agent.StreamWriter 接口相同，避免循环依赖
 type StreamWriter interface {
 	WriteText(text string) error
-	WriteProgress(step, detail string, elapsedMs int64) error
+	WriteProgress(step, detail, callID string, elapsedMs int64) error
 	WriteInteractive(kind string, data any) error
 	WriteSpeaker(name string) error
 	WriteImage(url string) error
@@ -389,6 +389,12 @@ func runAgent(ctx context.Context, ownerUserID, sessionID, peer, receiveIDType, 
 	}
 }
 
+// RunForSession 在已有 session 上主动触发 agent 执行，由子 agent 完成通知调用。
+// 等效于飞书收到用户文字消息时内部 runAgent 的调用路径，但从外部包（runner.go）触发。
+func RunForSession(ctx context.Context, ownerUserID, sessionID, peer, receiveIDType, appID, userText string) {
+	runAgent(ctx, ownerUserID, sessionID, peer, receiveIDType, appID, userText)
+}
+
 // ── feishuWriter：实现 agent.StreamWriter，先回复等待提示，完成后一次性发送 ────
 
 // spinnerFrames ⏳/⌛ 交替形成"沙漏翻转"动画
@@ -515,7 +521,7 @@ func (w *feishuWriter) WriteText(text string) error {
 }
 
 // WriteProgress 飞书无 UI 进度条，忽略
-func (w *feishuWriter) WriteProgress(_, _ string, _ int64) error { return nil }
+func (w *feishuWriter) WriteProgress(_, _, _ string, _ int64) error { return nil }
 
 // WriteSpeaker 飞书无动态发言人，忽略
 func (w *feishuWriter) WriteSpeaker(_ string) error { return nil }

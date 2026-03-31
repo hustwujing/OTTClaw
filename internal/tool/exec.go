@@ -41,6 +41,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,6 +52,14 @@ import (
 
 	"OTTClaw/config"
 )
+
+// ansiEscape 匹配 ANSI 转义序列，用于清理 PTY 输出中的终端控制字符。
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// absPathRe 从任意文本行中提取绝对路径候选。
+// 支持 Unix/macOS 风格（/tmp/chart.png）和 Windows 风格（C:\tmp\chart.png）。
+// 例：能从 "图片已保存到: /tmp/chart.png" 中提取 "/tmp/chart.png"。
+var absPathRe = regexp.MustCompile(`(?:/[^\s'"` + "`" + `]+|[A-Za-z]:[/\\][^\s'"` + "`" + `]+)`)
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -231,7 +241,6 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 		workdir = "."
 	}
 
-	// 构建 pending 记录
 	pending := &execPending{
 		id:         newExecID("ep_"),
 		command:    args.Command,
@@ -241,6 +250,12 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 		yieldMs:    args.YieldMs,
 		background: args.Background,
 		createdAt:  time.Now(),
+	}
+
+	// 子 agent 后台无人值守，跳过审批步骤直接执行。
+	// 安全性：用户在 spawn_subagent 时已授权子 agent 执行指定任务，exec 属于授权范围内。
+	if taskIDFromCtx(ctx) > 0 {
+		return runExecCommand(ctx, pending)
 	}
 
 	pendingStore.mu.Lock()
@@ -454,7 +469,145 @@ func execDoneResult(sess *execSession) string {
 	if sess.timedOut {
 		result["error"] = fmt.Sprintf("command timed out and was killed (timeout: %vs)", config.Cfg.ToolExecTimeoutSec)
 	}
+	// 自动检测 exec 期间在 output 目录下新生成的图片文件。
+	// processToolResult 收到 generatedImages 后会对每张图片调用 WriteImage，
+	// 无需 LLM 额外调用 output_file(action=download)。
+	imgs := scanNewOutputImages(sess.startedAt)
+
+	// 额外扫描 stdout 中打印的文件路径（处理脚本将文件保存到 /tmp/ 等非 output 目录的场景）。
+	// 图片自动复制到 output 目录并追加到 imgs；所有文件均注册临时下载 token 并记入 generatedFiles。
+	stdoutImgs, genFiles := scanFilesFromOutput(sess.fullOutput(), sess.startedAt)
+	seen := make(map[string]bool)
+	for _, u := range imgs {
+		seen[u] = true
+	}
+	for _, u := range stdoutImgs {
+		if !seen[u] {
+			imgs = append(imgs, u)
+			seen[u] = true
+		}
+	}
+	if len(imgs) > 0 {
+		result["generatedImages"] = imgs
+	}
+	if len(genFiles) > 0 {
+		result["generatedFiles"] = genFiles
+	}
 	return execMarshal(result)
+}
+
+// scanNewOutputImages 扫描 output 目录，返回在 since 之后新建或修改的图片文件的 web 路径列表。
+// 留 1s 缓冲以应对文件系统 mtime 精度为 1s 的场景（避免漏检同秒内生成的文件）。
+func scanNewOutputImages(since time.Time) []string {
+	outputAbs, err := filepath.Abs(config.Cfg.OutputDir)
+	if err != nil {
+		return nil
+	}
+	threshold := since.Add(-time.Second)
+	var images []string
+	_ = filepath.Walk(outputAbs, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !isImagePath(path) {
+			return nil
+		}
+		if !info.ModTime().Before(threshold) {
+			rel := strings.TrimPrefix(path, outputAbs)
+			rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+			images = append(images, "/"+config.Cfg.OutputDir+rel)
+		}
+		return nil
+	})
+	return images
+}
+
+// execGeneratedFile 描述 exec 运行期间自动检测到的非图片生成文件。
+type execGeneratedFile struct {
+	Name        string `json:"name"`
+	DownloadURL string `json:"download_url"`
+}
+
+// scanFilesFromOutput 解析 exec 标准输出，查找其中打印的文件绝对路径。
+//
+// 匹配条件：每行去除 ANSI 转义、首尾空白和 CR 后，满足：
+//   - 是绝对路径
+//   - 文件存在且 mtime 不早于 since-1s（exec 开始时间带 1s 缓冲）
+//
+// 图片文件（.png/.jpg/…）：若不在 output 目录内，先复制到 output/_auto/，
+// 再通过 RegisterFileDownload 获取 webURL，追加到返回的 images 列表。
+// 所有文件：注册临时下载 token，追加到返回的 files 列表。
+func scanFilesFromOutput(output string, since time.Time) (images []string, files []execGeneratedFile) {
+	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
+	threshold := since.Add(-time.Second)
+	seen := make(map[string]bool)
+
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		line = ansiEscape.ReplaceAllString(line, "")
+
+		// 从行内提取所有绝对路径候选（处理 "图片已保存到: /tmp/xxx.png" 等前缀场景）
+		for _, candidate := range absPathRe.FindAllString(line, -1) {
+			// 去掉末尾可能误匹配的标点（如句号、冒号、括号）
+			candidate = strings.TrimRight(candidate, ".,;:!?)>")
+			if seen[candidate] {
+				continue
+			}
+			info, err := os.Stat(candidate)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if info.ModTime().Before(threshold) {
+				continue
+			}
+			seen[candidate] = true
+
+			absPath := candidate
+
+			// 图片且不在 output 目录：复制到 output/_auto/ 使其可被 web 服务
+			if isImagePath(absPath) && outputAbs != "" && !strings.HasPrefix(absPath, outputAbs) {
+				if dest, copyErr := copyFileToOutput(absPath, outputAbs); copyErr == nil {
+					absPath = dest
+				}
+			}
+
+			dlURL, webURL, regErr := RegisterFileDownload(absPath)
+			if regErr != nil {
+				continue
+			}
+
+			files = append(files, execGeneratedFile{
+				Name:        filepath.Base(candidate),
+				DownloadURL: dlURL,
+			})
+			if webURL != "" {
+				images = append(images, webURL)
+			}
+		}
+	}
+	return
+}
+
+// copyFileToOutput 将文件复制到 outputAbs/_auto/ 目录，返回目标绝对路径。
+// 若目标同名文件已存在，加毫秒时间戳后缀避免覆盖。
+func copyFileToOutput(srcPath, outputAbs string) (string, error) {
+	destDir := filepath.Join(outputAbs, "_auto")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", err
+	}
+	baseName := filepath.Base(srcPath)
+	destPath := filepath.Join(destDir, baseName)
+	if _, err := os.Stat(destPath); err == nil {
+		// 同名文件已存在，加时间戳后缀
+		ext := filepath.Ext(baseName)
+		name := strings.TrimSuffix(baseName, ext)
+		destPath = filepath.Join(destDir, fmt.Sprintf("%s_%d%s", name, time.Now().UnixMilli(), ext))
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", err
+	}
+	return destPath, os.WriteFile(destPath, data, 0o644)
 }
 
 func execMarshal(v map[string]any) string {

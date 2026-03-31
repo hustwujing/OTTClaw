@@ -30,6 +30,52 @@ var serverBaseURL atomic.Value
 // SetServerBaseURL 供 HTTP 中间件调用，缓存服务的 base URL（如 "https://example.com"，不含末尾斜杠）。
 func SetServerBaseURL(base string) { serverBaseURL.Store(base) }
 
+// RegisterFileDownload 为已有文件生成临时下载 token，返回 downloadURL 和（图片在 output 目录时）webURL。
+// 供 exec 自动文件检测逻辑调用，无需 LLM 主动调用 output_file。
+func RegisterFileDownload(absPath string) (downloadURL, webURL string, err error) {
+	startDLCleanup()
+
+	info, statErr := os.Stat(absPath)
+	if statErr != nil || info.IsDir() {
+		return "", "", fmt.Errorf("file not found or is directory: %s", absPath)
+	}
+
+	token, tokenErr := newDLToken()
+	if tokenErr != nil {
+		return "", "", tokenErr
+	}
+
+	ttl := time.Duration(config.Cfg.DownloadTTLMin) * time.Minute
+	dlMu.Lock()
+	dlStore[token] = dlEntry{
+		FilePath:  absPath,
+		Filename:  filepath.Base(absPath),
+		ExpiresAt: time.Now().Add(ttl),
+	}
+	dlMu.Unlock()
+
+	base := ""
+	if v := serverBaseURL.Load(); v != nil {
+		base, _ = v.(string)
+	}
+	if base == "" {
+		base = "http://localhost:" + config.Cfg.ServerPort
+	}
+	downloadURL = base + "/download/" + token
+
+	// 图片且位于 output 目录下时，额外返回 webURL（供前端内联展示）
+	if isImagePath(absPath) {
+		outputAbs, err2 := filepath.Abs(config.Cfg.OutputDir)
+		if err2 == nil && strings.HasPrefix(absPath, outputAbs) {
+			rel := strings.TrimPrefix(absPath, outputAbs)
+			rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+			webURL = "/" + config.Cfg.OutputDir + rel
+		}
+	}
+
+	return downloadURL, webURL, nil
+}
+
 // isImagePath 判断路径是否为图片文件（按扩展名）
 func isImagePath(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {

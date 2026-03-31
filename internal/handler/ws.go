@@ -9,6 +9,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"OTTClaw/internal/agent"
 	"OTTClaw/internal/logger"
 	"OTTClaw/internal/middleware"
+	"OTTClaw/internal/runtrack"
 )
 
 // wsUpgrader 将 HTTP 连接升级为 WebSocket
@@ -87,10 +89,25 @@ func WS(c *gin.Context) {
 		writer := &wsWriter{conn: conn}
 
 		// 运行 Agent 循环（阻塞直到 LLM 响应完成）
-		if err := agent.Get().Run(c.Request.Context(), userID, sessionID, in.Message, writer); err != nil {
-			logger.Error("ws", userID, sessionID, "agent run failed", err, 0)
-			// writer.WriteError 已在 agent 内调用，此处不重复发送
-		}
+		func() {
+			defer runtrack.Default.Register("web", userID, sessionID)()
+			// /subagents spawn <task> 命令：绕过 LLM，直接派发子 agent
+			if task, ok := agent.ParseSpawnCmd(in.Message); ok {
+				taskID, _, spawnErr := agent.Get().SpawnSubagentCmd(c.Request.Context(), userID, sessionID, task)
+				if spawnErr != nil {
+					logger.Error("ws", userID, sessionID, "spawn subagent cmd failed", spawnErr, 0)
+					_ = writer.WriteError(fmt.Sprintf("子 agent 派发失败：%v", spawnErr))
+				} else {
+					_ = writer.WriteText(agent.SpawnCmdText(task, taskID))
+				}
+				_ = writer.WriteEnd()
+				return
+			}
+			if err := agent.Get().Run(c.Request.Context(), userID, sessionID, in.Message, writer); err != nil {
+				logger.Error("ws", userID, sessionID, "agent run failed", err, 0)
+				// writer.WriteError 已在 agent 内调用，此处不重复发送
+			}
+		}()
 	}
 }
 
@@ -106,11 +123,12 @@ func (w *wsWriter) WriteText(text string) error {
 }
 
 // WriteProgress 推送执行进度事件，前端可实时展示当前步骤
-func (w *wsWriter) WriteProgress(step, detail string, elapsedMs int64) error {
+func (w *wsWriter) WriteProgress(step, detail, callID string, elapsedMs int64) error {
 	return w.conn.WriteJSON(OutMsg{
 		Type:      "progress",
 		Step:      step,
 		Detail:    detail,
+		CallID:    callID,
 		ElapsedMs: elapsedMs,
 	})
 }

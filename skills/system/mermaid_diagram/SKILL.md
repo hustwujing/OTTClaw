@@ -38,8 +38,19 @@ matplotlib.use('Agg')  # headless, no display required
 import matplotlib.pyplot as plt
 import os, time
 
-# ── Font: use system CJK font so Chinese labels render correctly ──
-plt.rcParams['font.family'] = ['STHeiti', 'PingFang HK', 'Heiti TC', 'Arial Unicode MS', 'sans-serif']
+# ── CJK font: explicit path, cross-platform (see TOOL.md matplotlib section) ──
+import os
+from matplotlib import font_manager as _fm
+def _get_cn_font():
+    for p in ['/System/Library/Fonts/Hiragino Sans GB.ttc','/System/Library/Fonts/PingFang.ttc',
+              'C:/Windows/Fonts/msyh.ttc','C:/Windows/Fonts/simhei.ttf',
+              '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+              '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc']:
+        if os.path.exists(p): return _fm.FontProperties(fname=p)
+    for f in _fm.fontManager.ttflist:
+        if any(k in f.name for k in ('CJK','Heiti','YaHei','WenQuanYi')): return _fm.FontProperties(fname=f.fname)
+    return None
+cn_font = _get_cn_font()
 plt.rcParams['axes.unicode_minus'] = False
 
 # ── Data (fill in actual values) ──
@@ -53,10 +64,11 @@ ax.plot(labels, series1, 'o-', color='#FF6B6B', linewidth=2, markersize=6, label
 ax.plot(labels, series2, 'o-', color='#4ECDC4', linewidth=2, markersize=6, label='Series 2')
 ax.fill_between(labels, series1, series2, alpha=0.08, color='#FF6B6B')
 
-ax.set_title('Chart Title', fontsize=16, fontweight='bold', pad=15)
-ax.set_xlabel('X Axis', fontsize=12)
-ax.set_ylabel('Y Axis', fontsize=12)
-ax.legend(fontsize=11)
+ax.set_title('Chart Title', fontsize=16, fontweight='bold', pad=15,
+             **({"fontproperties": cn_font} if cn_font else {}))
+ax.set_xlabel('X Axis', fontsize=12, **({"fontproperties": cn_font} if cn_font else {}))
+ax.set_ylabel('Y Axis', fontsize=12, **({"fontproperties": cn_font} if cn_font else {}))
+ax.legend(prop=cn_font if cn_font else None, fontsize=None if cn_font else 11)
 ax.grid(True, linestyle='--', alpha=0.5)
 plt.tight_layout()
 
@@ -134,5 +146,5 @@ Then write HTML and screenshot — see Step A2.
 ## Notes
 
 - Never use `xychart-beta`; never use Mermaid for numeric data.
-- Call `plt.rcParams['font.family']` before any plot; use `figsize=(10,5), dpi=120`.
-- Pie charts: `ax.pie(...)`, omit xlabel/ylabel; bar charts: `ax.bar(...)`.
+- Use `_get_cn_font()` (defined in template) for all CJK text; never use `rcParams['font.sans-serif']`.
+- Use `figsize=(10,5), dpi=120`. Pie charts: `ax.pie(...)`, omit xlabel/ylabel; bar charts: `ax.bar(...)`.

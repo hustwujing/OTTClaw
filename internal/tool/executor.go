@@ -147,6 +147,92 @@ func userIDFromCtx(ctx context.Context) string {
 	return s
 }
 
+// ========== Context 注入：SubagentSpawner ==========
+
+// SubagentSpawner 后台启动子 agent 的函数类型，由 agent.Run() 注入。
+// taskID：sub_tasks 表主键；userID/childSessionID：子会话身份；taskDesc：传给子 agent 的完整任务描述。
+type SubagentSpawner func(taskID uint, userID, childSessionID, taskDesc, parentSessionID string)
+
+type subagentSpawnerKey struct{}
+
+// WithSubagentSpawner 将 SubagentSpawner 注入 context
+func WithSubagentSpawner(ctx context.Context, s SubagentSpawner) context.Context {
+	return context.WithValue(ctx, subagentSpawnerKey{}, s)
+}
+
+func subagentSpawnerFromCtx(ctx context.Context) SubagentSpawner {
+	s, _ := ctx.Value(subagentSpawnerKey{}).(SubagentSpawner)
+	return s
+}
+
+// ========== Context 注入：SubtaskCanceler ==========
+
+// SubtaskCanceler 主动取消子 agent 任务的函数类型，由 agent.Run() 注入。
+// taskID：sub_tasks 表主键；返回 true 表示找到了取消函数并已调用。
+type SubtaskCanceler func(taskID uint) bool
+
+type subtaskCancelerKey struct{}
+
+// WithSubtaskCanceler 将 SubtaskCanceler 注入 context
+func WithSubtaskCanceler(ctx context.Context, c SubtaskCanceler) context.Context {
+	return context.WithValue(ctx, subtaskCancelerKey{}, c)
+}
+
+func subtaskCancelerFromCtx(ctx context.Context) SubtaskCanceler {
+	c, _ := ctx.Value(subtaskCancelerKey{}).(SubtaskCanceler)
+	return c
+}
+
+// ========== Context 注入：TaskID（子 agent 自身 task ID）==========
+
+type taskIDCtxKey struct{}
+
+// WithTaskID 将当前 goroutine 对应的 sub_task ID 注入 context，仅在 RunBackground 中设置。
+func WithTaskID(ctx context.Context, taskID uint) context.Context {
+	return context.WithValue(ctx, taskIDCtxKey{}, taskID)
+}
+
+func taskIDFromCtx(ctx context.Context) uint {
+	id, _ := ctx.Value(taskIDCtxKey{}).(uint)
+	return id
+}
+
+// ========== Context 注入：SubtaskProgressReporter ==========
+
+// SubtaskProgressReporter 子 agent 主动上报进度的函数类型，由 RunBackground 注入。
+// 调用后更新 DB 中的 progress_summary，并按 notify_policy 决定是否通知父会话。
+type SubtaskProgressReporter func(progress string)
+
+type subtaskProgressReporterKey struct{}
+
+// WithSubtaskProgressReporter 将 SubtaskProgressReporter 注入 context
+func WithSubtaskProgressReporter(ctx context.Context, r SubtaskProgressReporter) context.Context {
+	return context.WithValue(ctx, subtaskProgressReporterKey{}, r)
+}
+
+func subtaskProgressReporterFromCtx(ctx context.Context) SubtaskProgressReporter {
+	r, _ := ctx.Value(subtaskProgressReporterKey{}).(SubtaskProgressReporter)
+	return r
+}
+
+// ========== Context 注入：ParentNotifier ==========
+
+// ParentNotifier 子 agent 向父 session 注入中间消息并触发新 LLM turn 的函数类型。
+// 由 RunBackground 注入；调用后异步触发父会话的 notifyMidTask，不阻塞子 agent 当前执行。
+type ParentNotifier func(message string)
+
+type parentNotifierKey struct{}
+
+// WithParentNotifier 将 ParentNotifier 注入 context
+func WithParentNotifier(ctx context.Context, n ParentNotifier) context.Context {
+	return context.WithValue(ctx, parentNotifierKey{}, n)
+}
+
+func parentNotifierFromCtx(ctx context.Context) ParentNotifier {
+	n, _ := ctx.Value(parentNotifierKey{}).(ParentNotifier)
+	return n
+}
+
 // ========== Executor ==========
 
 // Handler 工具处理函数签名
@@ -193,6 +279,10 @@ func New() *Executor {
 		e.register("honcho_context", handleHonchoContext)
 		e.register("honcho_conclude", handleHonchoConclude)
 	}
+	e.register("spawn_subagent", handleSpawnSubagent)
+	e.register("cancel_subtask", handleCancelSubtask)
+	e.register("report_task_progress", handleReportTaskProgress)
+	e.register("notify_parent", handleNotifyParent)
 	return e
 }
 
@@ -517,7 +607,7 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "cron",
-				Description: "Manage scheduled tasks (add/list/update/remove/run/status). The schedule field is complex — call get_tool_doc(\"cron\") first for full parameter docs.",
+				Description: "Manage scheduled tasks (add/list/update/remove/run/cancel/status/history). cancel: send cancellation signal to a currently-running job (id required); status returns running_jobs list. Use history to query recent run records (status, duration, errors). The schedule field is complex — call get_tool_doc(\"cron\") first for full parameter docs.",
 				Parameters: map[string]any{
 					"type":                 "object",
 					"properties":           map[string]any{},
@@ -614,6 +704,102 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 	if config.Cfg.HonchoEnabled {
 		all = append(all, HonchoTools()...)
 	}
+	// 子 agent 工具
+	all = append(all,
+		llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "spawn_subagent",
+				Description: "Delegate a subtask to an independent background subagent. Returns task_id immediately; subagent runs async. Use for long-running, parallelizable, or context-isolating work.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task": map[string]any{
+							"type":        "string",
+							"description": "Full task description for the subagent — be specific and self-contained",
+						},
+						"label": map[string]any{
+							"type":        "string",
+							"description": "Short human-readable task label shown in notifications and logs",
+						},
+						"context": map[string]any{
+							"type":        "string",
+							"description": "Background information appended to the subagent's prompt",
+						},
+						"notify_policy": map[string]any{
+							"type":        "string",
+							"description": "When to notify the parent session. done_only (default): terminal state only; state_changes: on running + terminal; silent: never notify.",
+							"enum":        []string{"done_only", "state_changes", "silent"},
+						},
+						"retain_hours": map[string]any{
+							"type":        "integer",
+							"description": "Hours to retain the task record after it reaches a terminal state. 0 = use global default (~72 h).",
+						},
+					},
+					"required": []string{"task"},
+				},
+			},
+		},
+		llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "cancel_subtask",
+				Description: "Cancel a running subagent task. force=false (default): graceful signal, stops after current call → cancelled; force=true: immediate DB kill → killed. Only queued/running tasks can be cancelled.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{
+							"type":        "integer",
+							"description": "task_id returned by spawn_subagent",
+						},
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "Cancellation reason (recorded in error_msg)",
+						},
+						"force": map[string]any{
+							"type":        "boolean",
+							"description": "true = force-kill to killed immediately; false (default) = graceful cancel to cancelled",
+						},
+					},
+					"required": []string{"task_id"},
+				},
+			},
+		},
+		llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "report_task_progress",
+				Description: "[Subagent only] Report current task progress to the parent session. Updates DB and shows in the subagent card. Call after each major step.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"progress": map[string]any{
+							"type":        "string",
+							"description": "Short description of current progress, e.g. 'Data collection complete, starting analysis'",
+						},
+					},
+					"required": []string{"progress"},
+				},
+			},
+		},
+		llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "notify_parent",
+				Description: "[Subagent only] Inject a message into the parent session and immediately trigger a new parent LLM turn. Unlike report_task_progress (DB-only), this wakes the parent agent for real-time decisions. Returns immediately without blocking the subagent.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"message": map[string]any{
+							"type":        "string",
+							"description": "Message to inject into the parent session, e.g. 'Phase 1 done: 200 records collected, 3 anomalies found — recommend deciding whether to continue'",
+						},
+					},
+					"required": []string{"message"},
+				},
+			},
+		},
+	)
 	// initialized=true 后，过滤掉仅在 bootstrap 阶段使用的工具
 	if cfg, err := storage.GetAppConfig(); err == nil && cfg.Initialized {
 		bootstrapOnly := map[string]bool{"update_role_md": true}

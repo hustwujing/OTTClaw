@@ -35,6 +35,9 @@ type OutMsg struct {
 	// Detail 进度描述（type=progress 时使用），人类可读
 	Detail string `json:"detail,omitempty"`
 
+	// CallID 工具调用 ID（仅 step=tool_call/tool_done/tool_error 时非空，用于前端精确匹配 pending 行）
+	CallID string `json:"call_id,omitempty"`
+
 	// ElapsedMs 自本轮 Agent 启动至此事件的耗时（毫秒）
 	ElapsedMs int64 `json:"elapsed_ms,omitempty"`
 

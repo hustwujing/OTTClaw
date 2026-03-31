@@ -153,6 +153,9 @@ type AppConfig struct {
 	HonchoAPIKey  string // HONCHO_API_KEY：Honcho API 密钥
 	HonchoAppID   string // HONCHO_APP_ID：预先创建的 App ID（空则用 HonchoAppName 自动 get_or_create）
 	HonchoAppName string // HONCHO_APP_NAME：Honcho 应用名称，默认 ottclaw
+
+	// 子 agent 任务清理
+	SubTaskRetentionDays int // SUBTASK_RETENTION_DAYS：终态子任务保留天数，超出后自动删除；默认 7，0 禁用
 }
 
 // Cfg 全局配置单例，进程启动时初始化一次
@@ -265,6 +268,7 @@ func loadConfig() *AppConfig {
 		HonchoBaseURL:          getEnv("HONCHO_BASE_URL", "https://demo.honcho.dev"),
 		HonchoAPIKey:           getEnv("HONCHO_API_KEY", ""),
 		HonchoAppID:            getEnv("HONCHO_APP_ID", ""),
+		SubTaskRetentionDays:   getEnvInt("SUBTASK_RETENTION_DAYS", 7),
 		HonchoAppName:          getEnv("HONCHO_APP_NAME", "ottclaw"),
 	}
 	cfg.LLMEndpoints = loadLLMEndpoints(cfg.LLMProvider, cfg.LLMMaxTokens, cfg.LLMRateLimit)

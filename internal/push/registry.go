@@ -20,7 +20,7 @@ var Default = &Registry{chans: make(map[string][]chan []byte)}
 
 // Subscribe 为指定 session 注册一个订阅 channel，返回只读 channel 和取消函数
 func (r *Registry) Subscribe(sessionID string) (<-chan []byte, func()) {
-	ch := make(chan []byte, 64)
+	ch := make(chan []byte, 4096)
 	r.mu.Lock()
 	r.chans[sessionID] = append(r.chans[sessionID], ch)
 	r.mu.Unlock()

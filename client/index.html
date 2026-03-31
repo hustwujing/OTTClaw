@@ -417,12 +417,57 @@ details[open] .proc-chevron { transform: rotate(90deg); }
 .step-name { color: var(--muted); flex-shrink: 0; }
 .step-detail { color: var(--text); flex: 1; word-break: break-all; }
 .step-ms { color: var(--muted); font-size: .7rem; flex-shrink: 0; }
+.sa-text-output { padding: 2px 10px 8px; }
+.notify-divider { border: none; border-top: 1px dashed var(--border); margin: 10px 0 8px; }
+.notify-append-wrap { padding-top: 2px; }
+/* 子任务等待进度条 */
+.sa-wait-widget {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 11px; margin-top: 8px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
+  font-size: .84rem; color: var(--muted);
+}
+.sa-wait-widget .spinner { color: var(--primary); width: 11px; height: 11px; flex-shrink: 0; }
+.sa-wait-counter { color: var(--primary); font-weight: 600; font-feature-settings: 'tnum'; }
 /* icon colors */
 .c-amber { color: #f59e0b; }
 .c-green { color: #22c55e; }
 .c-red   { color: #ef4444; }
 .c-blue  { color: #3b82f6; }
 .c-gray  { color: var(--muted); }
+/* ── 子 agent 折叠进度卡片 ──────────────────────────────────────────── */
+.subagent-row { padding: 2px 0 2px 2px; }
+.subagent-card { width: 100%; }
+/* sa-info 包裹任务标题 + 进度提示，撑满 summary 剩余宽度，标题与进度同行显示 */
+.sa-info { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: row; align-items: baseline; }
+.sa-task-desc {
+  flex-shrink: 0; max-width: 50%;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--text);
+}
+/* 进度提示：与标题同行，JS 控制显隐；·分隔符通过 ::before 自动插入 */
+.sa-progress-hint {
+  flex: 1; min-width: 0;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--muted); font-size: .9em;
+  display: none;
+}
+.sa-progress-hint::before { content: ' · '; }
+.sa-elapsed { color: var(--muted); font-size: .7rem; flex-shrink: 0; }
+.subagent-card.sa-done .proc-summary { opacity: .7; }
+.subagent-card.sa-failed .proc-summary { opacity: .7; }
+.sa-status-icon { flex-shrink: 0; width: 14px; text-align: center; }
+/* report_task_progress 里程碑行：左侧蓝色竖线 + 浅蓝背景，与工具步骤行视觉区分 */
+.sa-report-progress {
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+  border-left: 2px solid var(--primary);
+  padding-left: 6px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-style: italic;
+}
+.sa-report-progress .step-detail { color: var(--primary); }
 /* ── 等待状态动画 ───────────────────────────────────────────────── */
 @keyframes spin      { to { transform: rotate(360deg); } }
 @keyframes fade-dots { 0%,100%{ opacity:.25 } 50%{ opacity:1 } }
@@ -639,6 +684,205 @@ footer {
   color: inherit;
   text-decoration: none;
 }
+
+/* ── Cron History Panel ──────────────────────────────────────────── */
+.hist-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: flex-start; justify-content: flex-end;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+.hist-overlay.hidden { display: none !important; }
+.hist-panel {
+  background: var(--bg);
+  width: min(680px, 100vw);
+  height: 100dvh;
+  display: flex; flex-direction: column;
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+}
+.hist-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.hist-head h2 { font-size: 1rem; font-weight: 700; flex: 1; margin: 0; }
+.hist-filter {
+  display: flex; gap: 8px; align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.hist-filter input {
+  flex: 1; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--bg3); color: var(--text);
+  font-size: .875rem; outline: none; transition: border-color .15s;
+}
+.hist-filter input:focus { border-color: var(--primary); }
+.hist-table-wrap {
+  flex: 1; overflow-y: auto; overflow-x: auto;
+}
+.hist-table-wrap::-webkit-scrollbar { width: 4px; height: 4px; }
+.hist-table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.hist-table {
+  width: 100%; border-collapse: collapse;
+  font-size: .8125rem;
+}
+.hist-table th, .hist-table td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.hist-table th {
+  background: var(--bg2); font-weight: 600; color: var(--muted);
+  font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  position: sticky; top: 0; z-index: 1;
+}
+.hist-table tr:hover td { background: color-mix(in srgb, var(--border) 20%, transparent); }
+.hist-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  font-size: .72rem; font-weight: 600;
+}
+.hist-badge.running   { background: #dbeafe; color: #1d4ed8; }
+.hist-badge.succeeded { background: var(--ok-bg); color: var(--ok-text); }
+.hist-badge.failed    { background: var(--err-bg); color: var(--err-text); }
+.hist-badge.timed_out { background: #fef3c7; color: #92400e; }
+[data-theme="dark"] .hist-badge.running   { background: #1e3a5f; color: #93c5fd; }
+[data-theme="dark"] .hist-badge.timed_out { background: #451a03; color: #fcd34d; }
+.hist-err-cell {
+  max-width: 200px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: .75rem;
+}
+.hist-empty {
+  padding: 48px 16px; text-align: center;
+  color: var(--muted); font-size: .875rem;
+}
+.hist-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; flex-wrap: wrap; gap: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.hist-foot-info { font-size: .8125rem; color: var(--muted); }
+.hist-page-btns { display: flex; align-items: center; gap: 6px; }
+.hist-page-num  { font-size: .8125rem; color: var(--muted); min-width: 56px; text-align: center; }
+.hist-actions { display: flex; gap: 4px; flex-wrap: nowrap; }
+.hist-act-btn {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px; border-radius: 5px;
+  font-size: .72rem; font-weight: 500; cursor: pointer;
+  border: 1px solid currentColor; background: transparent;
+  transition: all .15s; white-space: nowrap; line-height: 1.5;
+  font-family: inherit;
+}
+.hist-act-btn:disabled { opacity: .35; cursor: not-allowed; }
+.hist-act-btn.cancel { color: var(--muted); }
+.hist-act-btn.cancel:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+.hist-act-btn.kill   { color: #ef4444; }
+.hist-act-btn.kill:hover:not(:disabled)   { background: rgba(239,68,68,.09); }
+.hist-act-btn.run    { color: #16a34a; }
+.hist-act-btn.run:hover:not(:disabled)    { background: rgba(34,197,94,.09); }
+.hist-act-btn.remove { color: #ef4444; }
+.hist-act-btn.remove:hover:not(:disabled) { background: rgba(239,68,68,.09); }
+[data-theme="dark"] .hist-act-btn.run { color: #4ade80; }
+
+/* ── Stats Panel ─────────────────────────────────────────────────── */
+.stats-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: flex-start; justify-content: flex-end;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+.stats-overlay.hidden { display: none !important; }
+.stats-panel {
+  background: var(--bg);
+  width: min(520px, 100vw);
+  height: 100dvh;
+  display: flex; flex-direction: column;
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+}
+.stats-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stats-head h2 { font-size: 1rem; font-weight: 700; flex: 1; margin: 0; }
+.stats-cards {
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  gap: 10px; padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stats-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 10px 8px;
+  text-align: center;
+}
+.stats-card-val {
+  font-size: 1.375rem; font-weight: 700; line-height: 1;
+}
+.stats-card-lbl {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted); margin-top: 5px;
+}
+.stats-card.total    .stats-card-val { color: var(--primary); }
+.stats-card.web      .stats-card-val { color: #7c3aed; }
+.stats-card.feishu   .stats-card-val { color: #0369a1; }
+.stats-card.cron     .stats-card-val { color: #d97706; }
+.stats-card.subagent .stats-card-val { color: #16a34a; }
+.stats-table-wrap { flex: 1; overflow-y: auto; overflow-x: auto; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: .8125rem; }
+.stats-table th, .stats-table td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.stats-table th {
+  background: var(--bg2); font-weight: 600; color: var(--muted);
+  font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  position: sticky; top: 0; z-index: 1;
+}
+.stats-table tr:hover td { background: color-mix(in srgb, var(--border) 20%, transparent); }
+.stats-empty {
+  padding: 48px 16px; text-align: center;
+  color: var(--muted); font-size: .875rem;
+}
+.rt-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  font-size: .72rem; font-weight: 600;
+}
+.rt-badge.web      { background: #ede9fe; color: #7c3aed; }
+.rt-badge.feishu   { background: #e0f2fe; color: #0369a1; }
+.rt-badge.cron     { background: #fef3c7; color: #d97706; }
+.rt-badge.subagent { background: #dcfce7; color: #16a34a; }
+[data-theme="dark"] .rt-badge.web      { background: #2e1065; color: #c4b5fd; }
+[data-theme="dark"] .rt-badge.feishu   { background: #0c4a6e; color: #7dd3fc; }
+[data-theme="dark"] .rt-badge.cron     { background: #451a03; color: #fcd34d; }
+[data-theme="dark"] .rt-badge.subagent { background: #052e16; color: #86efac; }
+.stats-btn-wrap { position: relative; display: inline-flex; }
+.stats-count-badge {
+  position: absolute; top: -3px; right: -4px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  background: #7c3aed; color: #fff;
+  border-radius: 7px; font-size: .6rem; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none; line-height: 1;
+}
+.stats-count-badge.hidden { display: none; }
+.stats-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stats-last-updated { font-size: .8125rem; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -687,6 +931,23 @@ footer {
           <path d="M12 5v14M5 12h14"/>
         </svg>
       </button>
+      <!-- Cron history -->
+      <button class="icon-btn" id="btn-hist" title="定时任务历史">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+      </button>
+      <!-- Running stats -->
+      <div class="stats-btn-wrap">
+        <button class="icon-btn" id="btn-stats" title="实时运行统计">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+        </button>
+        <span id="stats-count-badge" class="stats-count-badge hidden">0</span>
+      </div>
       <!-- Dark mode -->
       <button class="icon-btn" id="btn-theme" title="切换主题">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -765,6 +1026,110 @@ footer {
 
 <div id="toasts"></div>
 
+<!-- ══ Cron History Panel ════════════════════════════════════════════ -->
+<div id="hist-overlay" class="hist-overlay hidden">
+  <div class="hist-panel">
+    <div class="hist-head">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <h2>定时任务执行历史</h2>
+      <button class="icon-btn" id="btn-hist-close" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="hist-filter">
+      <input id="hist-q" type="text" placeholder="搜索任务名称…" autocomplete="off" />
+      <button class="btn btn-ghost" id="btn-hist-refresh" style="flex-shrink:0">刷新</button>
+    </div>
+    <div class="hist-table-wrap">
+      <table class="hist-table">
+        <thead>
+          <tr>
+            <th>任务名称</th>
+            <th>状态</th>
+            <th>开始时间</th>
+            <th>耗时</th>
+            <th>错误信息</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="hist-tbody"></tbody>
+      </table>
+      <div id="hist-empty" class="hist-empty hidden">暂无历史记录</div>
+    </div>
+    <div class="hist-foot">
+      <span class="hist-foot-info" id="hist-total-text"></span>
+      <div class="hist-page-btns">
+        <button class="btn btn-ghost" id="btn-hist-prev" style="padding:6px 12px">上一页</button>
+        <span class="hist-page-num" id="hist-page-num"></span>
+        <button class="btn btn-ghost" id="btn-hist-next" style="padding:6px 12px">下一页</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Stats Panel ═══════════════════════════════════════════════════ -->
+<div id="stats-overlay" class="stats-overlay hidden">
+  <div class="stats-panel">
+    <div class="stats-head">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+      <h2>实时运行统计</h2>
+      <button class="icon-btn" id="btn-stats-close" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="stats-cards">
+      <div class="stats-card total">
+        <div class="stats-card-val" id="stats-total">0</div>
+        <div class="stats-card-lbl">总计</div>
+      </div>
+      <div class="stats-card web">
+        <div class="stats-card-val" id="stats-web">0</div>
+        <div class="stats-card-lbl">Web</div>
+      </div>
+      <div class="stats-card feishu">
+        <div class="stats-card-val" id="stats-feishu">0</div>
+        <div class="stats-card-lbl">飞书</div>
+      </div>
+      <div class="stats-card cron">
+        <div class="stats-card-val" id="stats-cron">0</div>
+        <div class="stats-card-lbl">Cron</div>
+      </div>
+      <div class="stats-card subagent">
+        <div class="stats-card-val" id="stats-sub">0</div>
+        <div class="stats-card-lbl">子 Agent</div>
+      </div>
+    </div>
+    <div class="stats-table-wrap">
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th>来源</th>
+            <th>用户</th>
+            <th>会话</th>
+            <th>已运行</th>
+          </tr>
+        </thead>
+        <tbody id="stats-tbody"></tbody>
+      </table>
+      <div id="stats-empty" class="stats-empty hidden">当前没有正在运行的 Agent</div>
+    </div>
+    <div class="stats-foot">
+      <span class="stats-last-updated" id="stats-ts"></span>
+      <button class="btn btn-ghost" id="btn-stats-refresh" style="padding:6px 14px">刷新</button>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict';
 
@@ -782,6 +1147,7 @@ const S = {
   aiName:       'AI',
   avatarUrl:    '',
   notifySource: null,  // EventSource for server-initiated push (cron)
+  activeSubagentTaskIds: new Set(), // 正在运行的子任务 ID 集合
 };
 
 // Token 计数器动画状态（输入/输出各自独立）
@@ -1036,7 +1402,7 @@ async function loadHistory(sessionId) {
         addHistoryAIBubble(m.content, m.attachments);
       }
     });
-    scrollEnd();
+    scrollEnd(true); // 历史加载完毕后强制跳到底部
   } catch (_) { /* new session or network error — no history to show */ }
 }
 
@@ -1106,7 +1472,14 @@ async function streamSSE(message, bubble, signal) {
 
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      // 后端每 25s 发一次心跳；超过 40s 没有任何字节视为连接已死，主动抛错退出，
+      // 避免后端崩溃/代理超时后 reader.read() 无限期挂起导致 UI 卡死。
+      let _readTimer;
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise((_, rej) => (_readTimer = setTimeout(
+          () => rej(new Error('SSE 连接超时（服务端无响应）')), 40_000))),
+      ]).finally(() => clearTimeout(_readTimer));
       if (done) break;
 
       buf += decoder.decode(value, { stream: true });
@@ -1156,7 +1529,7 @@ async function streamSSE(message, bubble, signal) {
           }
 
           case 'progress': {
-            appendProg(bubble, ev.step || '', ev.detail || '', ev.elapsed_ms || 0);
+            appendProg(bubble, ev.step || '', ev.detail || '', ev.call_id || '', ev.elapsed_ms || 0);
             scrollEnd();
             break;
           }
@@ -1214,8 +1587,12 @@ async function streamSSE(message, bubble, signal) {
     reader.releaseLock();
   }
 
-  // 流结束但未收到 end 事件 → 连接中断
+  // 流结束但未收到 end 事件 → 连接中断（后端重启、崩溃、超时等）
   if (!ended) {
+    clearLLMWait(bubble);
+    rmTyping(bubble);
+    bubble.querySelectorAll('.status-line').forEach(e => e.remove());
+    if (textBuf) renderMD(bubble, textBuf); // 保留已收到的部分内容
     appendError(bubble, '连接已中断，内容可能不完整，请重试');
   }
   return null;
@@ -1250,8 +1627,11 @@ async function sendMessage(message, showUser = true) {
       rmTyping(bubble);
       bubble.querySelectorAll('.status-line').forEach(el => el.remove());
       bubble.querySelector('.proc-log')?.removeAttribute('open');
-      appendProg(bubble, 'stopped', '已停止', 0);
+      appendProg(bubble, 'stopped', '已停止', '', 0);
     } else {
+      clearLLMWait(bubble);
+      rmTyping(bubble);
+      bubble.querySelectorAll('.status-line').forEach(e => e.remove());
       appendError(bubble, String(e));
     }
   } finally {
@@ -1383,7 +1763,7 @@ function addUserBubble(text) {
   row.appendChild(avatar);
   row.appendChild(body);
   msgs().appendChild(row);
-  scrollEnd();
+  scrollEnd(true); // 用户发送消息时强制跳到底部，确保用户看到自己的消息
 }
 
 function addQueuedUserBubble(text) {
@@ -1398,7 +1778,7 @@ function addQueuedUserBubble(text) {
   row.appendChild(avatar);
   row.appendChild(body);
   msgs().appendChild(row);
-  scrollEnd();
+  scrollEnd(true); // 排队消息同样强制跳到底部
   return row;
 }
 
@@ -1445,7 +1825,7 @@ const STEP_META = {
   compress_error: { icon: '✗',     cls: 'c-red',   label: '压缩失败' },
 };
 
-function appendProg(bubble, step, detail, ms) {
+function appendProg(bubble, step, detail, callID, ms) {
   if (!(step in STEP_META)) {
     const line = el('div', 'status-line');
     line.innerHTML =
@@ -1476,7 +1856,10 @@ function appendProg(bubble, step, detail, ms) {
   const parentStep = { tool_done: 'tool_call', tool_error: 'tool_call',
                        compress_done: 'compress_start', compress_error: 'compress_start' }[step];
   if (parentStep) {
-    const pending = [...steps.querySelectorAll(`.proc-step[data-step="${parentStep}"]`)].pop();
+    // 优先按 callID 精确匹配；callID 缺失时回退到 pop()（兼容旧数据）
+    const pending = callID
+      ? steps.querySelector(`.proc-step.step-pending[data-step="${parentStep}"][data-call-id="${callID}"]`)
+      : [...steps.querySelectorAll(`.proc-step.step-pending[data-step="${parentStep}"]`)].pop();
     if (pending) {
       pending.classList.remove('step-pending');
       const iconEl = pending.querySelector('.step-icon');
@@ -1502,6 +1885,7 @@ function appendProg(bubble, step, detail, ms) {
   const line = el('div', 'proc-step');
   if (meta.pending) line.classList.add('step-pending');
   line.dataset.step = step;
+  if (step === 'tool_call' && callID) line.dataset.callId = callID;
   const iconHtml = meta.pending
     ? `<span class="step-icon ${meta.cls}"><span class="spinner"></span></span>`
     : `<span class="step-icon ${meta.cls}">${meta.icon}</span>`;
@@ -1563,7 +1947,15 @@ function renderMD(bubble, text) {
 function rmTyping(bubble) { bubble.querySelector('.typing')?.remove(); }
 
 function msgs()      { return document.getElementById('msgs'); }
-function scrollEnd() { const m = msgs(); m.scrollTop = m.scrollHeight; }
+// autoScroll：用户未手动往上滚动时保持自动跟底；手动向上滚动后暂停，
+// 待用户滚回底部（距底 ≤80px）时自动恢复。
+let autoScroll = true;
+
+function scrollEnd(force = false) {
+  const m = msgs();
+  if (force) { m.scrollTop = m.scrollHeight; autoScroll = true; return; }
+  if (autoScroll) m.scrollTop = m.scrollHeight;
+}
 function escHtml(s)  { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // yieldToMain: 通过 MessageChannel 让出主线程（task 边界，非 microtask），
@@ -1594,14 +1986,288 @@ function renderMDLive(bubble, text) {
   tc.innerHTML = html;
 }
 
+// ── 子 agent 折叠卡片辅助函数 ──────────────────────────────────────────────
+
+// fmtElapsed 将毫秒数格式化为人类可读字符串（如 1.2s / 2m 14s）
+function fmtElapsed(ms) {
+  if (!ms || ms <= 0) return '';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return m + 'm ' + (s > 0 ? s + 's' : '');
+}
+
+// addSubagentCard 在消息列表末尾追加一个折叠式子任务卡片行，返回 {row, steps, summary}
+// label：spawn_subagent 提供的短标签（优先作卡片标题）；taskDesc：完整任务描述（降级用）
+function addSubagentCard(taskId, taskDesc, label) {
+  const row = el('div', 'row subagent-row');
+  row.dataset.taskId = taskId;
+
+  const card = document.createElement('details');
+  card.className = 'proc-log subagent-card';
+
+  // 标题优先用短标签；无标签时截断任务描述
+  const titleText = label
+    ? label
+    : (taskDesc.length > 60 ? taskDesc.slice(0, 60) + '…' : taskDesc);
+
+  card.innerHTML =
+    '<summary class="proc-summary">' +
+      '<span class="sa-status-icon"><span class="spinner"></span></span>' +
+      '<span class="sa-info">' +
+        '<span class="sa-task-desc">' + escHtml(titleText) + '</span>' +
+        '<span class="sa-progress-hint"></span>' +
+      '</span>' +
+      '<span class="sa-elapsed"></span>' +
+      '<span class="proc-chevron">▶</span>' +
+    '</summary>' +
+    '<div class="proc-steps"></div>';
+
+  row.appendChild(card);
+  msgs().appendChild(row);
+  return {
+    row,
+    steps: card.querySelector('.proc-steps'),
+    summary: card.querySelector('.proc-summary'),
+    card,
+  };
+}
+
+// appendSubagentStep 向子 agent 卡片追加一条步骤行，复用现有 proc-step 样式
+function appendSubagentStep(steps, step, detail, callID, ms) {
+  const meta = STEP_META[step];
+  const div = el('div', meta ? 'proc-step' + (meta.pending ? ' step-pending' : '') : 'proc-step');
+  div.dataset.step = step;
+  if (step === 'tool_call' && callID) div.dataset.callId = callID;
+
+  // tool_call 到来时清除 llm_call 等待行（LLM 已响应，进入工具执行阶段）
+  if (step === 'tool_call') {
+    steps.querySelectorAll('.proc-step[data-step="llm_call"]').forEach(r => r.remove());
+  }
+
+  const iconEl = el('span', 'step-icon ' + (meta ? meta.cls : 'c-blue'));
+  if (meta && meta.pending) {
+    iconEl.innerHTML = '<span class="spinner"></span>';
+  } else {
+    iconEl.textContent = meta ? meta.icon : '▸';
+  }
+
+  const nameEl = el('span', 'step-name');
+  nameEl.textContent = meta ? meta.label : step;
+
+  const detailEl = el('span', 'step-detail');
+  detailEl.textContent = detail || '';
+
+  div.appendChild(iconEl); div.appendChild(nameEl); div.appendChild(detailEl);
+
+  if (ms) {
+    const msEl = el('span', 'step-ms');
+    msEl.textContent = fmtElapsed(ms);
+    div.appendChild(msEl);
+  }
+  steps.appendChild(div);
+  // 完成事件：找到对应 pending 行，原地更新（与 appendProg 逻辑一致）
+  return div;
+}
+
+// updateSubagentStep 处理 tool_done/tool_error 等完成事件：找到对应 pending 行原地更新
+function updateSubagentStep(steps, step, detail, callID, ms) {
+  const parentStep = { tool_done: 'tool_call', tool_error: 'tool_call',
+                       compress_done: 'compress_start', compress_error: 'compress_start' }[step];
+  if (!parentStep) return false;
+  const meta = STEP_META[step];
+  // 优先按 callID 精确匹配；callID 缺失时回退到 pop()
+  const pending = callID
+    ? steps.querySelector('.proc-step.step-pending[data-step="' + parentStep + '"][data-call-id="' + callID + '"]')
+    : [...steps.querySelectorAll('.proc-step.step-pending[data-step="' + parentStep + '"]')].pop();
+  if (!pending) return false;
+  pending.classList.remove('step-pending');
+  const iconEl = pending.querySelector('.step-icon');
+  iconEl.className = 'step-icon ' + (meta ? meta.cls : 'c-green');
+  iconEl.innerHTML = meta ? meta.icon : '✓';
+  if (detail) { const d = pending.querySelector('.step-detail'); if (d) d.textContent = detail; }
+  if (ms) {
+    let msEl = pending.querySelector('.step-ms');
+    if (!msEl) { msEl = el('span', 'step-ms'); pending.appendChild(msEl); }
+    msEl.textContent = fmtElapsed(ms);
+  }
+  return true;
+}
+
 // ── Server-initiated push (cron) ─────────────────────────────────────────
 function subscribeNotify(sessionId) {
   if (S.notifySource) { S.notifySource.close(); S.notifySource = null; }
+  S.activeSubagentTaskIds.clear(); // 切换会话时重置子任务跟踪状态
   if (!sessionId || !S.token) return;
   const url = `${S.url}/api/notify?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(S.token)}`;
   const es = new EventSource(url);
   S.notifySource = es;
   let bubble = null, textBuf = '', renderScheduled = false;
+  const subagentCards = {}; // task_id → {row, steps, summary, card, startMs}
+
+  // ── 子任务等待进度追踪 ───────────────────────────────────────────────
+  let waitBubble = null, waitTotal = 0, waitDone = 0;
+
+  // ── 断线补偿：子任务全部结束 → 等待 notify_start；若未到则从 DB 补加消息 ──
+  let waitingForBatch = false, batchRecoveryTimer = null, notifyTurnActive = false;
+  let fallbackInFlight = false; // 防止并发调用导致重复插入
+  let startupChecked = false;   // 首次连接的一次性追赶检查标志
+  let batchBaseCount = -1;      // setWaitingForBatch 时快照的 DB assistant 消息数；-1 = 未取
+
+  function clearBatchRecoveryTimer() {
+    if (batchRecoveryTimer) { clearTimeout(batchRecoveryTimer); batchRecoveryTimer = null; }
+  }
+
+  async function doFallbackLoad(retryCount = 0) {
+    clearBatchRecoveryTimer();
+    if (fallbackInFlight) return; // 另一个实例正在运行，避免重复插入
+    // notify_start 已收到且正在走正常 SSE 路径（有 bubble），无需 fallback
+    if (notifyTurnActive && bubble) { waitingForBatch = false; fallbackInFlight = false; return; }
+    fallbackInFlight = true;
+    if (S.sessionId !== sessionId) { waitingForBatch = false; notifyTurnActive = false; fallbackInFlight = false; return; }
+    try {
+      const messages = await apiGetMessages(sessionId);
+      const aiMsgs = messages.filter(m => m.role === 'assistant' && m.content);
+      // 用 batchBaseCount（setWaitingForBatch 时快照的 DB 计数）作为基准，
+      // 避免初始轮次 text+tool_calls 产生多条 origin_session_messages 记录
+      // 导致 domAICount 与 aiMsgs.length 不一致的假阳性插入。
+      const baseCount = batchBaseCount >= 0 ? batchBaseCount : msgs().querySelectorAll('.row.ai').length;
+      if (aiMsgs.length <= baseCount) {
+        // DB 尚无新消息（LLM 可能还在跑）
+        // 若 notify_start 已收到且正在走正常路径，停止轮询避免后续重复插入
+        fallbackInFlight = false;
+        if (notifyTurnActive && bubble) { waitingForBatch = false; return; }
+        // 最多重试 10 次，间隔 3s（共约 30s）
+        if (retryCount < 10) {
+          batchRecoveryTimer = setTimeout(() => doFallbackLoad(retryCount + 1), 3000);
+        } else {
+          waitingForBatch = false; notifyTurnActive = false; // 超时放弃
+        }
+        return;
+      }
+      // await 期间 notify_start 可能已抵达并创建 bubble：正常 SSE 路径在渲染，无需 fallback 插入
+      if (notifyTurnActive && bubble) { waitingForBatch = false; fallbackInFlight = false; return; }
+      waitingForBatch = false; notifyTurnActive = false; fallbackInFlight = false;
+      for (let i = baseCount; i < aiMsgs.length; i++) {
+        addHistoryAIBubble(aiMsgs[i].content, aiMsgs[i].attachments);
+      }
+      scrollEnd();
+      refreshSessionList();
+    } catch (_) { waitingForBatch = false; notifyTurnActive = false; fallbackInFlight = false; }
+  }
+
+  async function setWaitingForBatch() {
+    if (waitingForBatch) return; // 避免重复设置
+    waitingForBatch = true;
+    clearBatchRecoveryTimer();
+    // 快照此刻 DB 的 assistant 消息数，供 doFallbackLoad 作为比较基准，
+    // 避免初始轮次 text+tool_calls 写入多条 origin_session_messages 导致假阳性。
+    try {
+      const msgs_ = await apiGetMessages(sessionId);
+      batchBaseCount = msgs_.filter(m => m.role === 'assistant' && m.content).length;
+    } catch (_) {
+      batchBaseCount = msgs().querySelectorAll('.row.ai').length; // 降级：用 DOM 计数
+    }
+    batchRecoveryTimer = setTimeout(() => {
+      if (waitingForBatch && !notifyTurnActive) doFallbackLoad();
+    }, 5000);
+  }
+
+  // 在主 AI 气泡末尾注入（或复用）进度 widget
+  function getOrCreateWaitWidget() {
+    if (!waitBubble) return null;
+    let w = waitBubble.querySelector('.sa-wait-widget');
+    if (!w) {
+      w = el('div', 'sa-wait-widget');
+      w.innerHTML = '<span class="spinner"></span>' +
+        '<span>子任务进行中… <strong class="sa-wait-counter"></strong> 已完成</span>';
+      waitBubble.appendChild(w);
+    }
+    return w;
+  }
+
+  // 刷新 "X / Y 已完成" 数字
+  function updateWaitWidget() {
+    const w = getOrCreateWaitWidget();
+    if (!w) return;
+    const counter = w.querySelector('.sa-wait-counter');
+    if (counter) counter.textContent = waitDone + ' / ' + waitTotal;
+  }
+
+  // 任务全部结束后移除 widget，重置计数器
+  function removeWaitWidget() {
+    if (waitBubble) {
+      const w = waitBubble.querySelector('.sa-wait-widget');
+      if (w) w.remove();
+    }
+    waitBubble = null; waitTotal = 0; waitDone = 0; batchBaseCount = -1;
+  }
+
+  // ── 断连检测 ─────────────────────────────────────────────────────────
+  // 后端重启/崩溃 → EventSource 断连 → onerror 触发。
+  // 超过 5s 未恢复则将所有仍在运行的子任务卡片标记为"连接中断"，
+  // 避免卡片无限转圈、停止按钮永远显示。
+  let disconnectTimer = null;
+
+  function markAllCardsDisconnected() {
+    for (const tid of Object.keys(subagentCards)) {
+      const entry = subagentCards[tid];
+      entry.card.classList.add('sa-failed');
+      entry.card.removeAttribute('open');
+      const iconEl = entry.summary.querySelector('.sa-status-icon');
+      if (iconEl) iconEl.innerHTML = '<span class="c-amber">⊘</span>';
+      const elEl = entry.summary.querySelector('.sa-elapsed');
+      if (elEl) elEl.textContent = '已中断';
+      const hintEl = entry.summary.querySelector('.sa-progress-hint');
+      if (hintEl) { hintEl.textContent = '🔌 连接中断'; hintEl.style.display = 'block'; }
+      S.activeSubagentTaskIds.delete(Number(tid));
+      delete subagentCards[tid];
+    }
+    removeWaitWidget();
+    if (!S.busy) setSendState(false);
+  }
+
+  es.onerror = function() {
+    if (disconnectTimer) return; // 已有计时，不重复设置
+    if (Object.keys(subagentCards).length === 0) return; // 无运行中的卡片，无需处理
+    disconnectTimer = setTimeout(() => {
+      disconnectTimer = null;
+      markAllCardsDisconnected();
+    }, 5000); // 5s 后仍未恢复则标记全部为中断
+  };
+
+  es.onopen = function() {
+    // 重连成功：取消待处理的断连计时，任务若仍在后端运行则继续等待其事件
+    if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+    // 若重连时正处于"等待 notify_start"或"notify_start 已收到但 end 未到"的状态，
+    // 说明重连窗口内事件丢失，延迟 1s 后（给后端推送留余量）尝试从 DB 补加消息
+    if (waitingForBatch || notifyTurnActive) {
+      setTimeout(() => {
+        if (S.sessionId === sessionId && (waitingForBatch || notifyTurnActive)) doFallbackLoad();
+      }, 1000);
+    }
+    // 首次连接时的一次性追赶检查：覆盖 loadHistory 与 SSE 建立之间的竞态窗口。
+    // 若 LLM 在此窗口内完成写入，事件已发布但无订阅者接收，此处从 DB 补加。
+    if (!startupChecked) {
+      startupChecked = true;
+      setTimeout(async () => {
+        if (S.sessionId !== sessionId || fallbackInFlight || waitingForBatch || notifyTurnActive) return;
+        try {
+          const messages = await apiGetMessages(sessionId);
+          const aiMsgs = messages.filter(m => m.role === 'assistant' && m.content);
+          const domAICount = msgs().querySelectorAll('.row.ai').length;
+          if (aiMsgs.length > domAICount) {
+            for (let i = domAICount; i < aiMsgs.length; i++) {
+              addHistoryAIBubble(aiMsgs[i].content, aiMsgs[i].attachments);
+            }
+            scrollEnd(); refreshSessionList();
+          }
+        } catch (_) {}
+      }, 2000);
+    }
+  };
+
   es.onmessage = function(e) {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
@@ -1612,6 +2278,41 @@ function subscribeNotify(sessionId) {
         textBuf = ''; renderScheduled = false;
         scrollEnd();
         break;
+      case 'notify_start': {
+        clearBatchRecoveryTimer(); waitingForBatch = false; notifyTurnActive = true;
+        // 子任务全部完成后的回调：追加到派发子任务的那条 AI 气泡，而非新建气泡行。
+        // 以最后一张子任务卡片为锚点：卡片之后若出现新用户/AI消息（说明用户已发起新对话），
+        // 则退化为新建气泡；否则找卡片之前最近的 AI 气泡进行追加。
+        removeWaitWidget(); // 所有子任务已完成，移除等待进度条
+        let targetBubble = null;
+        const allRows = [...msgs().children];
+        let lastSAIdx = -1;
+        for (let i = allRows.length - 1; i >= 0; i--) {
+          if (allRows[i].classList.contains('subagent-row')) { lastSAIdx = i; break; }
+        }
+        if (lastSAIdx >= 0) {
+          const hasNewMsg = allRows.slice(lastSAIdx + 1)
+            .some(r => r.classList.contains('user') || r.classList.contains('ai'));
+          if (!hasNewMsg) {
+            for (let i = lastSAIdx - 1; i >= 0; i--) {
+              if (allRows[i].classList.contains('ai')) {
+                targetBubble = allRows[i].querySelector('.bubble.ai');
+                break;
+              }
+            }
+          }
+        }
+        if (targetBubble) {
+          targetBubble.appendChild(el('div', 'notify-divider'));
+          const wrap = el('div', 'notify-append-wrap');
+          targetBubble.appendChild(wrap);
+          bubble = wrap;
+        } else {
+          bubble = addAIBubble().bubble;
+        }
+        textBuf = ''; renderScheduled = false;
+        break;
+      }
       case 'text':
         if (!bubble) break;
         rmTyping(bubble);
@@ -1628,7 +2329,7 @@ function subscribeNotify(sessionId) {
         break;
       case 'progress':
         if (!bubble) break;
-        appendProg(bubble, ev.step || '', ev.detail || '', ev.elapsed_ms || 0);
+        appendProg(bubble, ev.step || '', ev.detail || '', ev.call_id || '', ev.elapsed_ms || 0);
         scrollEnd();
         break;
       case 'speaker': {
@@ -1637,18 +2338,38 @@ function subscribeNotify(sessionId) {
         if (sp) sp.textContent = (ev.content || '').trim() || 'AI';
         break;
       }
-      case 'end':
-        if (!bubble) break;
+      case 'end': {
+        if (!bubble) {
+          // notify_start 丢失时：收到 end 说明 LLM 已写入 DB，立即从 DB 补加
+          // 注意：不依赖 waitingForBatch 状态（5s 计时器可能已提前触发并重置了该标志）
+          doFallbackLoad();
+          break;
+        }
+        const wasNotifyActive = notifyTurnActive; notifyTurnActive = false;
         clearLLMWait(bubble);
         rmTyping(bubble);
         bubble.querySelectorAll('.status-line').forEach(el => el.remove());
         bubble.querySelector('.proc-log')?.removeAttribute('open');
         if (textBuf) renderMD(bubble, textBuf);
+        // 无文字输出时清理：notify_start 追加的 wrapper 只删 wrapper+分隔线；cron_start 删整行
+        if (!textBuf) {
+          if (bubble.classList.contains('notify-append-wrap')) {
+            const div = bubble.previousElementSibling;
+            if (div?.classList.contains('notify-divider')) div.remove();
+            bubble.remove();
+          } else {
+            bubble.closest('.row')?.remove();
+          }
+        }
         scrollEnd();
+        const hadText = !!textBuf;
         bubble = null; textBuf = '';
+        // notify_start 收到但无文字：text 事件可能在重连窗口丢失，从 DB 补加
+        if (!hadText && wasNotifyActive) { doFallbackLoad(); break; }
         refreshSessionList();
         fetchTokenUsage();
         break;
+      }
       case 'image':
         if (!bubble) break;
         rmTyping(bubble);
@@ -1663,6 +2384,183 @@ function subscribeNotify(sessionId) {
       case 'error':
         if (bubble) { appendError(bubble, ev.content || '未知错误'); scrollEnd(); }
         break;
+
+      // notifyBatch/notifyParent 触发的父 agent 轮次可能调用 exec 等需要用户确认的工具。
+      // 用户点击确认后，通过 sendMessage 触发新一轮主会话 LLM，agent 调用 exec_run 完成执行。
+      case 'interactive': {
+        if (!bubble) break;
+        rmTyping(bubble);
+        if (textBuf) renderMD(bubble, textBuf);
+        const iKind = ev.step;
+        const iData = typeof ev.data === 'string' ? JSON.parse(ev.data) : (ev.data || {});
+        showInteractive(bubble, iKind, iData).then(choice => {
+          if (choice !== null) {
+            addUserBubble(choice);
+            sendMessage(choice, false);
+          }
+        });
+        scrollEnd();
+        break;
+      }
+
+      // ── 子 agent 折叠卡片事件 ─────────────────────────────────────────
+      case 'subagent_start': {
+        const taskId = ev.task_id;
+        if (!taskId) break;
+        const desc = ev.content || '子任务';
+        const label = ev.label || '';
+        const card = addSubagentCard(taskId, desc, label);
+        subagentCards[taskId] = { ...card, startMs: Date.now(), desc, label };
+        S.activeSubagentTaskIds.add(taskId);
+        setSendState(S.busy); // 确保停止按钮可见
+        // 首次 subagent_start：找主 AI 气泡，后续直接复用 waitBubble
+        if (!waitBubble) {
+          const allRows = [...msgs().children];
+          for (let i = allRows.length - 1; i >= 0; i--) {
+            if (allRows[i].classList.contains('ai')) {
+              waitBubble = allRows[i].querySelector('.bubble.ai');
+              break;
+            }
+            if (allRows[i].classList.contains('user')) break;
+          }
+        }
+        waitTotal++;
+        updateWaitWidget();
+        scrollEnd();
+        break;
+      }
+      // subagent_report_progress：子 agent 通过 report_task_progress 工具主动上报的里程碑进度。
+      // 区别于 subagent_progress（工具调用步骤），此事件字段为 {task_id, label, progress}。
+      // 每次上报追加一条里程碑行（保留历史，用户可看到进度演变）。
+      case 'subagent_report_progress': {
+        const entry = subagentCards[ev.task_id];
+        const progress = (ev.progress || '').trim();
+        if (!entry || !progress) break;
+        // 展开区：追加带样式的里程碑行（完整历史，展开后可见）
+        const div = el('div', 'proc-step sa-report-progress');
+        div.dataset.step = 'report_progress';
+        const iconEl = el('span', 'step-icon c-blue');
+        iconEl.textContent = '▶';
+        const detailEl = el('span', 'step-detail');
+        detailEl.textContent = progress;
+        div.appendChild(iconEl);
+        div.appendChild(detailEl);
+        entry.steps.appendChild(div);
+        // summary 栏：实时更新最新进度（折叠状态下可见）
+        const hintEl = entry.summary.querySelector('.sa-progress-hint');
+        if (hintEl) { hintEl.textContent = progress; hintEl.style.display = 'block'; }
+        const elEl = entry.summary.querySelector('.sa-elapsed');
+        if (elEl) elEl.textContent = fmtElapsed(Date.now() - entry.startMs);
+        scrollEnd();
+        break;
+      }
+      case 'subagent_progress': {
+        const entry = subagentCards[ev.task_id];
+        if (!entry) break;
+        const step = ev.step || '', detail = ev.detail || '', ms = ev.elapsed_ms || 0;
+        if (!updateSubagentStep(entry.steps, step, detail, ev.call_id || '', ms)) {
+          appendSubagentStep(entry.steps, step, detail, ev.call_id || '', ms);
+        }
+        // 更新 summary 耗时
+        const elEl = entry.summary.querySelector('.sa-elapsed');
+        if (elEl) elEl.textContent = fmtElapsed(Date.now() - entry.startMs);
+        scrollEnd();
+        break;
+      }
+      case 'subagent_text': {
+        const entry = subagentCards[ev.task_id];
+        if (!entry || !ev.content) break;
+        // 累积文本到单一容器，整体 markdown 渲染，避免逐 token 产生碎片行
+        if (!entry.textBuf) entry.textBuf = '';
+        entry.textBuf += ev.content;
+        if (!entry.textEl) {
+          const wrap = el('div', 'sa-text-output');
+          const tc = el('div', 'bubble-text');
+          wrap.appendChild(tc);
+          entry.steps.appendChild(wrap);
+          entry.textEl = tc;
+        }
+        const processed = preMarkdown(entry.textBuf);
+        entry.textEl.innerHTML = window.marked
+          ? marked.parse(processed)
+          : escHtml(entry.textBuf).replace(/\n/g, '<br>');
+        scrollEnd();
+        break;
+      }
+      case 'subagent_image': {
+        const entry = subagentCards[ev.task_id];
+        if (!entry || !ev.content) break;
+        const imgDiv = el('div', 'proc-step');
+        const img = document.createElement('img');
+        img.className = 'msg-img'; img.src = ev.content;
+        img.alt = '图片'; img.loading = 'lazy';
+        img.style.maxWidth = '160px'; img.style.marginTop = '4px';
+        imgDiv.appendChild(img);
+        entry.steps.appendChild(imgDiv);
+        scrollEnd();
+        break;
+      }
+      case 'subagent_end': {
+        const entry = subagentCards[ev.task_id];
+        if (!entry) break;
+        // 兜底：将所有未配对的 pending 步骤（如纯文本轮次的 llm_call）标记为完成
+        entry.steps.querySelectorAll('.proc-step.step-pending').forEach(p => {
+          p.classList.remove('step-pending');
+          const ic = p.querySelector('.step-icon');
+          if (ic) { ic.className = 'step-icon c-green'; ic.innerHTML = '✓'; }
+        });
+        entry.card.classList.add('sa-done');
+        entry.card.removeAttribute('open'); // 完成后自动折叠
+        const iconEl = entry.summary.querySelector('.sa-status-icon');
+        if (iconEl) iconEl.innerHTML = '<span class="c-green">✓</span>';
+        const elEl = entry.summary.querySelector('.sa-elapsed');
+        if (elEl) elEl.textContent = fmtElapsed(ev.elapsed_ms || (Date.now() - entry.startMs));
+        const hintEl = entry.summary.querySelector('.sa-progress-hint');
+        if (hintEl) { hintEl.textContent = '✅ 已完成'; hintEl.style.display = 'block'; }
+        S.activeSubagentTaskIds.delete(ev.task_id);
+        delete subagentCards[ev.task_id];
+        waitDone++; updateWaitWidget();
+        if (Object.keys(subagentCards).length === 0 && waitTotal > 0) setWaitingForBatch();
+        if (!S.busy) setSendState(false); // 所有子任务完成后隐藏停止按钮
+        scrollEnd();
+        break;
+      }
+      case 'subagent_error': {
+        // 仅将错误信息追加到步骤列表供展开查看；卡片最终状态由 subagent_status 事件负责更新。
+        const entry = subagentCards[ev.task_id];
+        if (!entry) break;
+        if (ev.content) appendSubagentStep(entry.steps, 'tool_error', ev.content, '', ev.elapsed_ms || 0);
+        scrollEnd();
+        break;
+      }
+      case 'subagent_status': {
+        // runner.go 确认最终状态后推送，保证标签语义准确（取消/超时/强制中止/失败各不同）。
+        const entry = subagentCards[ev.task_id];
+        if (!entry) break;
+        const status = ev.status || 'failed';
+        const statusMap = {
+          cancelled: { icon: '<span class="c-amber">⊘</span>', hint: '🚫 已取消',    elapsed: '已取消' },
+          timed_out: { icon: '<span class="c-amber">⏱</span>', hint: '⏱ 已超时',    elapsed: '已超时' },
+          killed:    { icon: '<span class="c-amber">⊘</span>', hint: '⚡ 已强制中止', elapsed: '已中止' },
+          failed:    { icon: '<span class="c-red">✗</span>',   hint: '❌ 执行失败',  elapsed: '失败'   },
+        };
+        const meta = statusMap[status] || statusMap.failed;
+        entry.card.classList.add('sa-failed');
+        entry.card.removeAttribute('open');
+        const iconEl = entry.summary.querySelector('.sa-status-icon');
+        if (iconEl) iconEl.innerHTML = meta.icon;
+        const elEl = entry.summary.querySelector('.sa-elapsed');
+        if (elEl) elEl.textContent = meta.elapsed;
+        const hintEl = entry.summary.querySelector('.sa-progress-hint');
+        if (hintEl) { hintEl.textContent = meta.hint; hintEl.style.display = 'block'; }
+        S.activeSubagentTaskIds.delete(ev.task_id);
+        delete subagentCards[ev.task_id];
+        waitDone++; updateWaitWidget();
+        if (Object.keys(subagentCards).length === 0 && waitTotal > 0) setWaitingForBatch();
+        if (!S.busy) setSendState(false); // 所有子任务完成后隐藏停止按钮
+        scrollEnd();
+        break;
+      }
     }
   };
 }
@@ -1708,8 +2606,10 @@ function preMarkdown(text) {
 }
 
 function setSendState(busy) {
-  // 忙碌时仍保持发送按钮和输入框可用，允许继续排队；只额外显示停止按钮
-  document.getElementById('btn-stop').style.display = busy ? 'flex' : 'none';
+  // 忙碌时仍保持发送按钮和输入框可用，允许继续排队；只额外显示停止按钮。
+  // 父 agent 流结束后，若仍有子任务在运行，停止按钮保持可见以供取消子任务。
+  const showStop = busy || S.activeSubagentTaskIds.size > 0;
+  document.getElementById('btn-stop').style.display = showStop ? 'flex' : 'none';
 }
 
 function updateQueueBadge() {
@@ -1840,6 +2740,9 @@ async function enterApp(createNew) {
   // 初次加载 token 消耗
   fetchTokenUsage();
 
+  // 初次加载运行统计（更新 header badge）
+  statsLoad();
+
   document.getElementById('ta').focus();
 }
 
@@ -1950,6 +2853,250 @@ async function uploadFile(file) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+//  Cron History Panel
+// ══════════════════════════════════════════════════════════════════════
+const HIST = { page: 1, pageSize: 20, total: 0 };
+
+async function histLoad() {
+  if (!S.token) return;
+  const q = document.getElementById('hist-q').value.trim();
+  try {
+    const qs = `page=${HIST.page}&page_size=${HIST.pageSize}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    const r = await fetch(`${S.url}/api/cron/history?${qs}`, {
+      headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    HIST.total = data.total || 0;
+    histRender(data.rows || []);
+    document.getElementById('hist-total-text').textContent = `共 ${HIST.total} 条`;
+    const totalPages = Math.max(1, Math.ceil(HIST.total / HIST.pageSize));
+    document.getElementById('hist-page-num').textContent = `${HIST.page} / ${totalPages}`;
+    document.getElementById('btn-hist-prev').disabled = HIST.page <= 1;
+    document.getElementById('btn-hist-next').disabled = HIST.page >= totalPages;
+  } catch (e) { toast('加载历史失败: ' + String(e), 'err'); }
+}
+
+function histRender(rows) {
+  const tbody = document.getElementById('hist-tbody');
+  const empty = document.getElementById('hist-empty');
+  tbody.innerHTML = '';
+  if (!rows.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const startedAt = new Date(r.started_at);
+    const endedAt   = r.ended_at ? new Date(r.ended_at) : null;
+    const durMs      = endedAt ? (endedAt - startedAt) : null;
+    const dur        = durMs !== null ? fmtElapsed(durMs) : '—';
+    const timeStr    = startedAt.toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    tr.innerHTML =
+      `<td style="font-weight:500">${escHtml(r.job_name || r.job_id)}</td>` +
+      `<td><span class="hist-badge ${escHtml(r.status)}">${escHtml(r.status)}</span></td>` +
+      `<td style="white-space:nowrap;font-size:.75rem">${timeStr}</td>` +
+      `<td style="white-space:nowrap;font-variant-numeric:tabular-nums">${dur}</td>` +
+      `<td class="hist-err-cell" title="${escHtml(r.error_msg || '')}">${escHtml(r.error_msg || '')}</td>`;
+
+    // ── Actions cell ──────────────────────────────────────────────────
+    const actTd  = document.createElement('td');
+    actTd.style.whiteSpace = 'nowrap';
+    const actWrap = document.createElement('div');
+    actWrap.className = 'hist-actions';
+
+    if (r.status === 'running') {
+      const cancelBtn = _histBtn('cancel', '取消',   () => histCancelJob(r.job_id, tr));
+      const killBtn   = _histBtn('kill',   '强制中止', () => histForceKillJob(r.job_id, tr));
+      actWrap.appendChild(cancelBtn);
+      actWrap.appendChild(killBtn);
+    } else {
+      const runBtn    = _histBtn('run',    '触发', () => histRunJob(r.job_id, tr));
+      const removeBtn = _histBtn('remove', '移除', () => histRemoveJob(r.job_id, tr));
+      actWrap.appendChild(runBtn);
+      actWrap.appendChild(removeBtn);
+    }
+
+    actTd.appendChild(actWrap);
+    tr.appendChild(actTd);
+    tbody.appendChild(tr);
+  });
+}
+
+function _histBtn(cls, label, handler) {
+  const btn = document.createElement('button');
+  btn.className = 'hist-act-btn ' + cls;
+  btn.textContent = label;
+  btn.addEventListener('click', handler);
+  return btn;
+}
+
+function _histDisableRow(rowEl) {
+  rowEl.querySelectorAll('.hist-act-btn').forEach(b => { b.disabled = true; });
+}
+
+async function histCancelJob(jobID, rowEl) {
+  _histDisableRow(rowEl);
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}/cancel`, {
+      method: 'POST', headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    toast(data.was_running ? '取消信号已发送' : '任务当前未在运行');
+    // goroutine 需要一点时间响应取消信号并更新 DB
+    setTimeout(() => histLoad(), 900);
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
+}
+
+async function histForceKillJob(jobID, rowEl) {
+  _histDisableRow(rowEl);
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}/force-kill`, {
+      method: 'POST', headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    toast('已强制中止');
+    histLoad(); // DB 已同步更新，立即刷新
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
+}
+
+async function histRunJob(jobID, rowEl) {
+  _histDisableRow(rowEl);
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data.started) {
+      toast('任务已触发（后台运行）');
+    } else {
+      toast(data.message || '任务已在运行中');
+    }
+    // 记录已在 handler 中同步写入 DB，立即刷新即可（无需 setTimeout）
+    histLoad();
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
+}
+
+async function histRemoveJob(jobID, rowEl) {
+  _histDisableRow(rowEl);
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    toast('定时任务已永久移除');
+    HIST.page = 1;
+    histLoad();
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
+}
+
+let _histQTimer = null;
+function histQChange() {
+  clearTimeout(_histQTimer);
+  _histQTimer = setTimeout(() => { HIST.page = 1; histLoad(); }, 350);
+}
+
+function openHistPanel() {
+  if (!S.token) { toast('请先连接服务器', 'err'); return; }
+  document.getElementById('hist-overlay').classList.remove('hidden');
+  HIST.page = 1;
+  histLoad();
+}
+
+function closeHistPanel() {
+  document.getElementById('hist-overlay').classList.add('hidden');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Stats (实时运行统计)
+// ══════════════════════════════════════════════════════════════════════
+let _statsTimer = null;
+
+async function statsLoad() {
+  if (!S.token) return;
+  try {
+    const r = await fetch(`${S.url}/api/stats`, {
+      headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    statsRender(data);
+  } catch (_) { /* network error, ignore */ }
+}
+
+function statsRender(data) {
+  const s = data.summary || {};
+  const runs = data.runs || [];
+
+  // Summary cards
+  document.getElementById('stats-total').textContent  = s.total    ?? 0;
+  document.getElementById('stats-web').textContent    = s.web      ?? 0;
+  document.getElementById('stats-feishu').textContent = s.feishu   ?? 0;
+  document.getElementById('stats-cron').textContent   = s.cron     ?? 0;
+  document.getElementById('stats-sub').textContent    = s.subagent ?? 0;
+
+  // Header badge
+  const badge = document.getElementById('stats-count-badge');
+  if ((s.total ?? 0) > 0) {
+    badge.textContent = s.total;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+
+  // Run table
+  const tbody = document.getElementById('stats-tbody');
+  const empty = document.getElementById('stats-empty');
+  tbody.innerHTML = '';
+  if (runs.length === 0) {
+    empty.classList.remove('hidden');
+  } else {
+    empty.classList.add('hidden');
+    runs.forEach(run => {
+      const tr = document.createElement('tr');
+      const shortSess = (run.session_id || '-').slice(0, 8) + '…';
+      const elapsed   = fmtElapsedMs(run.elapsed_ms ?? 0);
+      const uid       = escHtml(run.user_id || '-');
+      const rt        = escHtml(run.runtime || 'web');
+      tr.innerHTML =
+        `<td><span class="rt-badge ${rt}">${rt}</span></td>` +
+        `<td style="color:var(--muted);font-size:.78rem">${uid}</td>` +
+        `<td style="font-family:monospace;font-size:.75rem;color:var(--muted)">${escHtml(shortSess)}</td>` +
+        `<td style="color:var(--text)">${escHtml(elapsed)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Timestamp
+  document.getElementById('stats-ts').textContent =
+    '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+}
+
+function fmtElapsedMs(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${m}m ${s}s`;
+}
+
+function openStatsPanel() {
+  if (!S.token) { toast('请先连接服务器', 'err'); return; }
+  document.getElementById('stats-overlay').classList.remove('hidden');
+  statsLoad();
+  _statsTimer = setInterval(statsLoad, 10000);
+}
+
+function closeStatsPanel() {
+  document.getElementById('stats-overlay').classList.add('hidden');
+  clearInterval(_statsTimer);
+  _statsTimer = null;
+}
+
+// ══════════════════════════════════════════════════════════════════════
 //  Bootstrap
 // ══════════════════════════════════════════════════════════════════════
 (async function boot() {
@@ -1992,6 +3139,12 @@ async function uploadFile(file) {
 
   document.getElementById('f-code').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
 
+  // 用户手动上滚时暂停自动跟底；滚回底部（≤80px）时恢复
+  document.getElementById('msgs').addEventListener('scroll', () => {
+    const m = document.getElementById('msgs');
+    autoScroll = m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+  }, { passive: true });
+
   const ta = document.getElementById('ta');
   document.getElementById('btn-send').addEventListener('click', () => {
     const msg = ta.value.trim();
@@ -2010,6 +3163,15 @@ async function uploadFile(file) {
     S.queue.forEach(item => item.row.remove());
     S.queue = [];
     updateQueueBadge();
+    // 取消所有正在运行的子任务
+    if (S.activeSubagentTaskIds.size > 0) {
+      for (const tid of S.activeSubagentTaskIds) {
+        fetch(`${S.url}/api/subtask/${tid}/cancel`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${S.token}` },
+        }).catch(() => {});
+      }
+    }
   });
   document.getElementById('queue-clear').addEventListener('click', () => {
     S.queue.forEach(item => item.row.remove());
@@ -2048,6 +3210,34 @@ async function uploadFile(file) {
       window.open(e.target.src, '_blank');
     }
   });
+
+  // ── Cron history panel ─────────────────────────────────────────────
+  document.getElementById('btn-hist').addEventListener('click', openHistPanel);
+  document.getElementById('btn-hist-close').addEventListener('click', closeHistPanel);
+  document.getElementById('btn-hist-refresh').addEventListener('click', () => { HIST.page = 1; histLoad(); });
+  document.getElementById('btn-hist-prev').addEventListener('click', () => {
+    if (HIST.page > 1) { HIST.page--; histLoad(); }
+  });
+  document.getElementById('btn-hist-next').addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(HIST.total / HIST.pageSize));
+    if (HIST.page < totalPages) { HIST.page++; histLoad(); }
+  });
+  document.getElementById('hist-q').addEventListener('input', histQChange);
+  // clicking the backdrop closes the panel
+  document.getElementById('hist-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('hist-overlay')) closeHistPanel();
+  });
+
+  // Stats panel
+  document.getElementById('btn-stats').addEventListener('click', openStatsPanel);
+  document.getElementById('btn-stats-close').addEventListener('click', closeStatsPanel);
+  document.getElementById('btn-stats-refresh').addEventListener('click', statsLoad);
+  document.getElementById('stats-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('stats-overlay')) closeStatsPanel();
+  });
+
+  // 后台每 30s 刷新 header badge（面板关闭时也更新）
+  setInterval(() => { if (S.token) statsLoad(); }, 30000);
 
   if (window.marked) {
     marked.setOptions({ breaks: true, gfm: true });

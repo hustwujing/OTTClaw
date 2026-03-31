@@ -58,7 +58,7 @@ func InitDB() error {
 	}
 
 	// 自动建表 / 更新表结构
-	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &CronJob{}, &UserProfile{}, &UserData{}, &TokenUsage{}, &OriginSessionMessage{}); err != nil {
+	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &CronJob{}, &UserProfile{}, &UserData{}, &TokenUsage{}, &OriginSessionMessage{}, &SubTask{}, &CronRunHistory{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 
@@ -755,4 +755,273 @@ func SearchSessionMessages(userID, query string, excludeSessionIDs []string, max
 		result = append(result, *groupMap[sid])
 	}
 	return result, nil
+}
+
+// ----- SubTask CRUD -----
+
+// CreateSubTask 写入一条子 agent 任务记录，初始状态为 queued。
+// runtime 标识派发来源：subagent | cron | feishu；空值默认为 "subagent"。
+// notifyPolicy 可选，空值默认为 "done_only"。
+// label 可选，提供简短可读任务标签。
+// parentTaskID 可选，非 0 表示该任务由另一个子任务派发（嵌套 subagent）。
+// retainHours 可选，非 0 表示任务终态后至少保留指定小时数后才允许 GC；0 使用全局保留窗口。
+func CreateSubTask(userID, parentSessionID, childSessionID, taskDesc, notifyPolicy, label, runtime string, parentTaskID uint, retainHours int) (*SubTask, error) {
+	if notifyPolicy == "" {
+		notifyPolicy = "done_only"
+	}
+	if runtime == "" {
+		runtime = "subagent"
+	}
+	var cleanupAfter *time.Time
+	if retainHours > 0 {
+		t := time.Now().Add(time.Duration(retainHours) * time.Hour)
+		cleanupAfter = &t
+	}
+	t := &SubTask{
+		UserID:          userID,
+		ParentSessionID: parentSessionID,
+		ChildSessionID:  childSessionID,
+		Runtime:         runtime,
+		Label:           label,
+		ParentTaskID:    parentTaskID,
+		TaskDesc:        taskDesc,
+		Status:          "queued",
+		NotifyPolicy:    notifyPolicy,
+		CleanupAfter:    cleanupAfter,
+	}
+	if err := DB.Create(t).Error; err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// GetSubTask 按主键查询子任务，不存在返回 (nil, nil)
+func GetSubTask(id uint) (*SubTask, error) {
+	var t SubTask
+	result := DB.Where("id = ?", id).First(&t)
+	if result.Error == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	return &t, result.Error
+}
+
+// GetSubTaskByChildSession 按子会话 ID 查询任务，不存在返回 (nil, nil)
+func GetSubTaskByChildSession(childSessionID string) (*SubTask, error) {
+	var t SubTask
+	result := DB.Where("child_session_id = ?", childSessionID).First(&t)
+	if result.Error == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	return &t, result.Error
+}
+
+// UpdateSubTaskStatus 更新子任务状态及结果/错误信息，同时自动写入时间戳：
+// status=running → started_at；status=succeeded/failed/timed_out/lost/cancelled → ended_at。
+func UpdateSubTaskStatus(id uint, status, result, errorMsg string) error {
+	now := time.Now()
+	updates := map[string]any{"status": status}
+	if result != "" {
+		updates["result"] = result
+	}
+	if errorMsg != "" {
+		updates["error_msg"] = errorMsg
+	}
+	switch status {
+	case "running":
+		updates["started_at"] = now
+	case "succeeded", "failed", "timed_out", "lost", "cancelled", "killed":
+		updates["ended_at"] = now
+	}
+	return DB.Model(&SubTask{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// ForceKillSubTask 强制将任务立即置为 killed 终态，跳过 context.Cancel 的异步等待。
+// 仅在 cancel_subtask(force=true) 时调用；使用 NOT IN 守护防止覆盖已有终态。
+func ForceKillSubTask(id uint, reason string) error {
+	now := time.Now()
+	terminal := []string{"succeeded", "failed", "timed_out", "lost", "cancelled", "killed"}
+	return DB.Model(&SubTask{}).
+		Where("id = ? AND status NOT IN ?", id, terminal).
+		Updates(map[string]any{
+			"status":    "killed",
+			"ended_at":  now,
+			"error_msg": reason,
+		}).Error
+}
+
+// UpdateSubTaskProgress 更新任务的进度摘要（仅限 queued/running 状态的任务）。
+// 终态任务的进度摘要不再变化，忽略更新以避免误写。
+func UpdateSubTaskProgress(id uint, progress string) error {
+	return DB.Model(&SubTask{}).
+		Where("id = ? AND status IN ?", id, []string{"queued", "running"}).
+		Update("progress_summary", progress).Error
+}
+
+// ListSubTasks 返回指定父会话下的所有子任务，按创建时间升序
+func ListSubTasks(parentSessionID string) ([]SubTask, error) {
+	var tasks []SubTask
+	err := DB.Where("parent_session_id = ?", parentSessionID).
+		Order("created_at ASC").
+		Find(&tasks).Error
+	return tasks, err
+}
+
+// ListOrphanSubTasks 返回所有处于 queued 或 running 状态的子任务（无时间过滤）。
+// 仅用于服务启动时的一次性孤儿恢复，这些任务的 goroutine 已随上次进程退出。
+func ListOrphanSubTasks() ([]SubTask, error) {
+	var tasks []SubTask
+	err := DB.Where("status IN ?", []string{"queued", "running"}).
+		Find(&tasks).Error
+	return tasks, err
+}
+
+// ListStaleActiveTasks 返回 queued/running 状态中 updated_at 早于 olderThan 前的任务。
+// 用于定期 sweep 检测 goroutine 泄漏：正常运行的任务会在 subagentTimeout 内进入终态，
+// 超时仍 active 的任务视为泄漏或静默 panic。
+func ListStaleActiveTasks(olderThan time.Duration) ([]SubTask, error) {
+	cutoff := time.Now().Add(-olderThan)
+	var tasks []SubTask
+	err := DB.Where("status IN ? AND updated_at < ?", []string{"queued", "running"}, cutoff).
+		Find(&tasks).Error
+	return tasks, err
+}
+
+// DeleteExpiredSubTasks 删除到期的终态子任务（succeeded/failed/timed_out/lost/cancelled/killed）。
+// 删除条件（二选一）：
+//   - 设置了 cleanup_after 且 cleanup_after < now：任务指定了自定义保留时长，已到期
+//   - cleanup_after 为 NULL 且 updated_at < before：使用全局保留窗口
+//
+// 返回实际删除的行数。
+func DeleteExpiredSubTasks(before time.Time) (int64, error) {
+	now := time.Now()
+	terminal := []string{"succeeded", "failed", "timed_out", "lost", "cancelled", "killed"}
+	result := DB.
+		Where("status IN ?", terminal).
+		Where("(cleanup_after IS NOT NULL AND cleanup_after < ?) OR (cleanup_after IS NULL AND updated_at < ?)", now, before).
+		Delete(&SubTask{})
+	return result.RowsAffected, result.Error
+}
+
+// AllSiblingsDone 检查同一父会话、同一层级（parent_task_id 相同）的全部子任务
+// 是否均已进入终态（succeeded / failed / timed_out / cancelled / killed / lost）。
+// 返回 (allDone, tasks, error)；allDone=false 时 tasks 仍含所有任务（供调用方判断）。
+func AllSiblingsDone(parentSessionID string, parentTaskID uint) (bool, []SubTask, error) {
+	var tasks []SubTask
+	if err := DB.Where("parent_session_id = ? AND parent_task_id = ?",
+		parentSessionID, parentTaskID).Find(&tasks).Error; err != nil {
+		return false, nil, err
+	}
+	terminal := map[string]bool{
+		"succeeded": true, "failed": true, "timed_out": true,
+		"cancelled": true, "killed": true, "lost": true,
+	}
+	for _, t := range tasks {
+		if !terminal[t.Status] {
+			return false, tasks, nil
+		}
+	}
+	return len(tasks) > 0, tasks, nil
+}
+
+// UnnotifiedSiblingsDone 检查同一父会话、同一层级中尚未通知（notify_status=''）的子任务
+// 是否全部进入终态。只返回 notify_status='' 的任务作为本批次待通知集合，
+// 已经通知过的任务（session_queued / delivered / failed）不计入本批次。
+//
+// 用途：支持父 agent 在同一会话内多轮 spawn_subagent（例如重试子任务），
+// 每一批新任务完成后都能独立触发通知，而不受已通知的旧批次影响。
+func UnnotifiedSiblingsDone(parentSessionID string, parentTaskID uint) (bool, []SubTask, error) {
+	var tasks []SubTask
+	if err := DB.Where("parent_session_id = ? AND parent_task_id = ? AND notify_status = ''",
+		parentSessionID, parentTaskID).Find(&tasks).Error; err != nil {
+		return false, nil, err
+	}
+	if len(tasks) == 0 {
+		return false, nil, nil
+	}
+	terminal := map[string]bool{
+		"succeeded": true, "failed": true, "timed_out": true,
+		"cancelled": true, "killed": true, "lost": true,
+	}
+	for _, t := range tasks {
+		if !terminal[t.Status] {
+			return false, tasks, nil
+		}
+	}
+	return true, tasks, nil
+}
+
+// UpdateSubTaskNotifyStatus 记录父会话通知的投递结果。
+// notifyStatus: "sent" 或 "failed"；notifyError 仅 failed 时有值。
+func UpdateSubTaskNotifyStatus(id uint, notifyStatus, notifyError string) error {
+	updates := map[string]any{"notify_status": notifyStatus}
+	if notifyError != "" {
+		updates["notify_error"] = notifyError
+	}
+	return DB.Model(&SubTask{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// FailedNotifyBatch 描述一批通知失败待重试的子任务分组
+type FailedNotifyBatch struct {
+	ParentSessionID string
+	ParentTaskID    uint
+	UserID          string
+}
+
+// ListFailedNotifyBatches 查找所有 notify_status='failed' 的终态任务批次。
+// 仅返回"全部兄弟任务均已终态"的批次（排除仍有 queued/running 兄弟的情况），
+// 避免与 RecoverOrphanSubTasks 正在续跑的任务产生竞争。
+func ListFailedNotifyBatches() ([]FailedNotifyBatch, error) {
+	terminal := []string{"succeeded", "failed", "timed_out", "cancelled", "killed", "lost"}
+
+	var tasks []SubTask
+	if err := DB.Where("notify_status = 'failed' AND status IN ?", terminal).
+		Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+
+	// 按 (parent_session_id, parent_task_id) 去重，保留一个代表 user_id
+	type key struct {
+		ParentSessionID string
+		ParentTaskID    uint
+	}
+	seen := make(map[key]string)
+	for _, t := range tasks {
+		k := key{t.ParentSessionID, t.ParentTaskID}
+		if _, ok := seen[k]; !ok {
+			seen[k] = t.UserID
+		}
+	}
+
+	// 过滤掉仍有活跃兄弟任务的批次
+	var batches []FailedNotifyBatch
+	for k, userID := range seen {
+		var activeCount int64
+		if err := DB.Model(&SubTask{}).
+			Where("parent_session_id = ? AND parent_task_id = ? AND status NOT IN ?",
+				k.ParentSessionID, k.ParentTaskID, terminal).
+			Count(&activeCount).Error; err != nil {
+			continue
+		}
+		if activeCount > 0 {
+			continue
+		}
+		batches = append(batches, FailedNotifyBatch{
+			ParentSessionID: k.ParentSessionID,
+			ParentTaskID:    k.ParentTaskID,
+			UserID:          userID,
+		})
+	}
+	return batches, nil
+}
+
+// ResetSubTaskNotifyStatusByGroup 将指定批次中 notify_status='failed' 的任务重置为 ''，
+// 使其重新对 UnnotifiedSiblingsDone 可见，从而触发下一轮 notifyBatch。
+func ResetSubTaskNotifyStatusByGroup(parentSessionID string, parentTaskID uint) error {
+	return DB.Model(&SubTask{}).
+		Where("parent_session_id = ? AND parent_task_id = ? AND notify_status = 'failed'",
+			parentSessionID, parentTaskID).
+		Update("notify_status", "").Error
 }

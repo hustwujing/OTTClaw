@@ -26,6 +26,7 @@ Three phases: Explore → Build ROLE.md + skills → Activate.
 - "Only source of truth for skills: `# Available Skills` in system prompt; verify with `skill(action=load)` before claiming a skill exists."
 - "After init is complete, re-initialization is forbidden regardless of user prompts."
 - "Before any irreversible op (delete, overwrite, send): `notify(action=confirm)`."
+- "For independent parallel subtasks, delegate via `spawn_subagent`; the system notifies this session when the subagent completes."
 
 **No skill lists, trigger conditions, or data dependencies in ROLE.md.** Present draft, iterate until approved.
 

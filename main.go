@@ -28,7 +28,7 @@ import (
 	"OTTClaw/internal/logger"
 	"OTTClaw/internal/mcp"
 	"OTTClaw/internal/middleware"
-	"OTTClaw/internal/push"
+	"OTTClaw/internal/runtrack"
 	"OTTClaw/internal/skill"
 	"OTTClaw/internal/storage"
 	"OTTClaw/internal/tool"
@@ -77,24 +77,34 @@ func main() {
 	}
 	logger.Info("agent", "", "", "agent initialized", 0)
 
-	// ---- 3.5 同步已实现工具状态 ----
+	// ---- 3.5 孤儿子任务恢复 ----
+	// 将上次进程退出时卡在 queued/running 的子任务标记为 failed，并通知父 agent。
+	// 在后台 goroutine 中执行，不阻塞启动流程。
+	go agent.Get().RecoverOrphanSubTasks()
+	// 重试上次进程退出时因 LLM 调用失败（context canceled）而丢失的批量通知。
+	go agent.Get().RecoverFailedNotifications()
+
+	// ---- 3.6 同步已实现工具状态 ----
 	if err := agent.SyncToolRequestStatus(); err != nil {
 		logger.Warn("main", "", "", fmt.Sprintf("sync tool request status: %v", err), 0)
 	} else {
 		logger.Info("main", "", "", "tool request status synced", 0)
 	}
 
-	// ---- 3.6 启动 Node.js Playwright 浏览器 sidecar ----
+	// ---- 3.7 启动 Node.js Playwright 浏览器 sidecar ----
 	if err := browser.Default.Start(); err != nil {
 		logger.Warn("main", "", "", fmt.Sprintf("browser server not started: %v", err), 0)
 	} else {
 		defer browser.Default.Stop()
 	}
 
-	// ---- 3.7 注入 agent runner 到 cron 包，并启动定时任务调度器 ----
+	// ---- 3.8 注入 agent runner 到 cron 包，并启动定时任务调度器 ----
+	// RunCronJob 内部根据 creatorSession.Source 自动选择 writer：
+	//   web    → push.CronWriter（SSE 实时推送）
+	//   feishu → feishu.FeishuCronWriter（主动卡片消息）
+	//   cron / 其他 → resultWriter（静默后台）
 	cron.SetAgentRunner(func(ctx context.Context, userID, creatorSessionID, jobName, message string) error {
-		w := push.NewCronWriter(creatorSessionID, jobName, message)
-		return agent.Get().Run(ctx, userID, creatorSessionID, message, w)
+		return agent.Get().RunCronJob(ctx, userID, creatorSessionID, jobName, message)
 	})
 	cron.Default.Start()
 	defer cron.Default.Stop()
@@ -144,6 +154,20 @@ func main() {
 		// Token 消耗统计：GET /api/token-usage
 		authed.GET("/api/token-usage", handler.GetTokenUsage)
 
+		// 实时并发统计：GET /api/stats
+		authed.GET("/api/stats", handler.GetStats)
+
+		// 定时任务执行历史：GET /api/cron/history?q=&page=&page_size=
+		authed.GET("/api/cron/history", handler.GetCronHistory)
+		// 定时任务操作：取消 / 强制中止 / 立即触发 / 永久删除
+		authed.POST("/api/cron/:job_id/cancel", handler.CancelCronJob)
+		authed.POST("/api/cron/:job_id/force-kill", handler.ForceKillCronJob)
+		authed.POST("/api/cron/:job_id/run", handler.RunCronJobNow)
+		authed.DELETE("/api/cron/:job_id", handler.DeleteCronJob)
+
+		// 子任务操作：取消
+		authed.POST("/api/subtask/:task_id/cancel", handler.CancelSubTask)
+
 		// 需要 JWT + 会话归属校验的接口
 		sessionAuthed := authed.Group("/")
 		sessionAuthed.Use(middleware.SessionOwner())
@@ -173,6 +197,18 @@ func main() {
 
 	// ---- 5. 注入 agent runner 到 feishu 包，并启动长连接 ----
 	feishu.SetAgentRunner(func(ctx context.Context, userID, sessionID, userText string, writer feishu.StreamWriter) error {
+		defer runtrack.Default.Register("feishu", userID, sessionID)()
+		// /subagents spawn <task> 命令：绕过 LLM，直接派发子 agent
+		if task, ok := agent.ParseSpawnCmd(userText); ok {
+			taskID, _, spawnErr := agent.Get().SpawnSubagentCmd(ctx, userID, sessionID, task)
+			if spawnErr != nil {
+				_ = writer.WriteError(fmt.Sprintf("子 agent 派发失败：%v", spawnErr))
+			} else {
+				_ = writer.WriteText(agent.SpawnCmdText(task, taskID))
+			}
+			_ = writer.WriteEnd()
+			return spawnErr
+		}
 		return agent.Get().Run(ctx, userID, sessionID, userText, writer)
 	})
 	go feishu.Registry.StartAll(context.Background())
@@ -194,6 +230,28 @@ func main() {
 	// 所有 defer 均正常触发（atexit 等价），避免 os.Exit 绕过清理逻辑。
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+
+	// SIGUSR1：热重载 ROLE.md / TOOL.md / 技能，不重启进程、不中断运行中的会话。
+	// 用法：kill -USR1 <pid>
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGUSR1)
+	go func() {
+		for range reload {
+			logger.Info("main", "", "", "SIGUSR1: reloading config...", 0)
+			if err := agent.Get().Reload(); err != nil {
+				logger.Warn("main", "", "", "config reload failed: "+err.Error(), 0)
+			} else {
+				logger.Info("main", "", "", "ROLE.md + TOOL.md reloaded", 0)
+			}
+			if err := skill.Store.LoadAll(config.Cfg.SkillsDir); err != nil {
+				logger.Warn("main", "", "", "skill reload failed: "+err.Error(), 0)
+			} else {
+				heads := skill.Store.GetAllHeads()
+				logger.Info("main", "", "", fmt.Sprintf("skills reloaded: %d skill(s)", len(heads)), 0)
+			}
+		}
+	}()
+
 	go func() {
 		if err := srv.Serve(tcpNoDelayListener{ln}); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)

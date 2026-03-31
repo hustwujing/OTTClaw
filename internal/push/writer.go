@@ -27,6 +27,15 @@ func NewCronWriter(sessionID, jobName, jobMessage string) *CronWriter {
 	return w
 }
 
+// NewCronWriterSilent 创建 CronWriter 并发布 notify_start 事件（无用户气泡）。
+// 用于 notifyParent / notifyMidTask：系统内部触发的 LLM 轮次，
+// 前端需初始化 AI 气泡以接收后续 text/progress 事件，但不应显示用户侧气泡。
+func NewCronWriterSilent(sessionID string) *CronWriter {
+	w := &CronWriter{sessionID: sessionID}
+	w.publish(map[string]any{"type": "notify_start"})
+	return w
+}
+
 func (w *CronWriter) publish(m map[string]any) {
 	b, _ := json.Marshal(m)
 	Default.Publish(w.sessionID, b)
@@ -37,18 +46,31 @@ func (w *CronWriter) WriteText(text string) error {
 	return nil
 }
 
-func (w *CronWriter) WriteProgress(step, detail string, elapsedMs int64) error {
-	w.publish(map[string]any{
+func (w *CronWriter) WriteProgress(step, detail, callID string, elapsedMs int64) error {
+	m := map[string]any{
 		"type":       "progress",
 		"step":       step,
 		"detail":     detail,
 		"elapsed_ms": elapsedMs,
-	})
+	}
+	if callID != "" {
+		m["call_id"] = callID
+	}
+	w.publish(m)
 	return nil
 }
 
-// WriteInteractive cron 任务不应有交互控件，静默忽略
-func (w *CronWriter) WriteInteractive(_ string, _ any) error { return nil }
+// WriteInteractive 将交互控件事件（exec 确认框等）发布到前端 notify SSE 通道。
+// notifyBatch/notifyParent 触发的父 agent 轮次由用户实时可见，因此需要支持交互。
+func (w *CronWriter) WriteInteractive(kind string, data any) error {
+	b, _ := json.Marshal(data)
+	w.publish(map[string]any{
+		"type": "interactive",
+		"step": kind,
+		"data": json.RawMessage(b),
+	})
+	return nil
+}
 
 func (w *CronWriter) WriteSpeaker(name string) error {
 	w.publish(map[string]any{"type": "speaker", "content": name})

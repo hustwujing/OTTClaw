@@ -21,6 +21,7 @@ import (
 	"OTTClaw/internal/agent"
 	"OTTClaw/internal/logger"
 	"OTTClaw/internal/middleware"
+	"OTTClaw/internal/runtrack"
 )
 
 // sseRequest 请求体
@@ -76,6 +77,19 @@ func SSE(c *gin.Context) {
 
 	done := make(chan error, 1)
 	go func() {
+		defer runtrack.Default.Register("web", userID, sessionID)()
+		// /subagents spawn <task> 命令：绕过 LLM，直接派发子 agent
+		if task, ok := agent.ParseSpawnCmd(req.Message); ok {
+			taskID, _, spawnErr := agent.Get().SpawnSubagentCmd(agentCtx, userID, sessionID, task)
+			if spawnErr != nil {
+				_ = writer.WriteError(fmt.Sprintf("子 agent 派发失败：%v", spawnErr))
+			} else {
+				_ = writer.WriteText(agent.SpawnCmdText(task, taskID))
+			}
+			_ = writer.WriteEnd()
+			done <- spawnErr
+			return
+		}
 		done <- agent.Get().Run(agentCtx, userID, sessionID, req.Message, writer)
 	}()
 
@@ -152,11 +166,12 @@ func (s *sseWriter) WriteText(text string) error {
 }
 
 // WriteProgress 推送执行进度事件，前端可实时展示当前步骤
-func (s *sseWriter) WriteProgress(step, detail string, elapsedMs int64) error {
+func (s *sseWriter) WriteProgress(step, detail, callID string, elapsedMs int64) error {
 	return s.writeSSE(OutMsg{
 		Type:      "progress",
 		Step:      step,
 		Detail:    detail,
+		CallID:    callID,
 		ElapsedMs: elapsedMs,
 	})
 }

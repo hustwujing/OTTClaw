@@ -18,7 +18,7 @@ import (
 	"OTTClaw/internal/storage"
 )
 
-// handleCron 处理 cron 工具调用，支持 status/list/add/update/remove/run 六种 action
+// handleCron 处理 cron 工具调用，支持 status/list/add/update/remove/run/cancel/history 八种 action
 func handleCron(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Action   string          `json:"action"`
@@ -27,6 +27,7 @@ func handleCron(ctx context.Context, argsJSON string) (string, error) {
 		Schedule json.RawMessage `json:"schedule"` // schedule 对象，直接传 JSON object
 		Message  string          `json:"message"`
 		Enabled  *bool           `json:"enabled"`
+		Limit    int             `json:"limit"` // history action：返回条数，默认 20
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parse cron args: %w", err)
@@ -47,15 +48,20 @@ func handleCron(ctx context.Context, argsJSON string) (string, error) {
 		return cronRemove(userID, args.ID)
 	case "run":
 		return cronRun(userID, args.ID)
+	case "cancel":
+		return cronCancel(args.ID)
+	case "history":
+		return cronHistory(userID, args.ID, args.Limit)
 	default:
-		return "", fmt.Errorf("unknown cron action %q; supported: status|list|add|update|remove|run", args.Action)
+		return "", fmt.Errorf("unknown cron action %q; supported: status|list|add|update|remove|run|cancel|history", args.Action)
 	}
 }
 
 func cronStatus() (string, error) {
 	b, _ := json.Marshal(map[string]any{
-		"status": "running",
-		"tick":   "30s",
+		"status":       "running",
+		"tick":         "30s",
+		"running_jobs": cronpkg.Default.RunningJobs(),
 	})
 	return string(b), nil
 }
@@ -169,6 +175,27 @@ func cronRun(userID, id string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get cron job: %w", err)
 	}
-	cronpkg.Default.RunJobNow(*job)
+	cronpkg.Default.RunJobNow(*job, "", 0) // session 和 history 由 runJob 内部创建
 	return `{"ok":true,"message":"job triggered in background"}`, nil
+}
+
+func cronCancel(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	wasRunning := cronpkg.Default.CancelJob(id)
+	b, _ := json.Marshal(map[string]any{
+		"ok":          wasRunning,
+		"was_running": wasRunning,
+	})
+	return string(b), nil
+}
+
+func cronHistory(userID, jobID string, limit int) (string, error) {
+	rows, err := storage.ListCronRunHistory(jobID, userID, limit)
+	if err != nil {
+		return "", fmt.Errorf("list cron run history: %w", err)
+	}
+	b, _ := json.MarshalIndent(rows, "", "  ")
+	return string(b), nil
 }

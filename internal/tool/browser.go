@@ -69,6 +69,15 @@ type browserArgs struct {
 	WaitSelector   string   `json:"waitSelector,omitempty"`
 }
 
+// isNoPageError 判断错误是否为"无活跃页面"，即浏览器尚未 launch 或上下文已关闭。
+func isNoPageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no active page") || strings.Contains(msg, "call /launch first")
+}
+
 func handleBrowser(ctx context.Context, argsJSON string) (string, error) {
 	var args browserArgs
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
@@ -86,6 +95,19 @@ func handleBrowser(ctx context.Context, argsJSON string) (string, error) {
 
 	c := browser.NewClient(userID, ctx)
 
+	result, err := dispatchBrowserAction(c, args)
+	// 若操作返回"无活跃页面"（浏览器未 launch 或上下文已关闭），
+	// 自动 launch 一次后重试，避免 LLM 因此多调一次 launch。
+	// launch / close 自身不做重试。
+	if isNoPageError(err) && args.Action != "launch" && args.Action != "close" {
+		if launchErr := c.Launch(nil); launchErr == nil {
+			result, err = dispatchBrowserAction(c, args)
+		}
+	}
+	return result, err
+}
+
+func dispatchBrowserAction(c *browser.Client, args browserArgs) (string, error) {
 	switch args.Action {
 	case "launch":
 		headless := args.Headless

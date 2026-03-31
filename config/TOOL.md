@@ -2,35 +2,84 @@
 
 ## exec
 
-**Purpose**: Execute a shell command via `bash -c`. Short commands return output directly; long-running commands background automatically and return a `session_id` — use `process(action=poll)` to stream output.
+Execute a shell command via `bash -c`. Short commands return output inline; long-running ones background and return `session_id` — poll with `process(action=poll)`.
 
-**Basic parameters** (always available):
-- `command` (string, required): Shell command string
-- `workdir` (string, optional): Working directory; defaults to server's working directory
+| Param | Default | Notes |
+|-------|---------|-------|
+| `command` | **required** | Shell command |
+| `workdir` | server cwd | Working directory |
+| `env` | — | Extra env vars `{"K":"V"}` |
+| `timeout_sec` | 1800 | Hard timeout (seconds) |
+| `yield_ms` | 10000 | Wait window before backgrounding |
+| `background` | false | `true` = skip wait, background immediately |
 
-**Advanced parameters** (rarely needed — pass only when required):
-- `env` (object, optional): Additional environment variables, e.g. `{"FOO": "bar"}`
-- `timeout_sec` (integer, optional): Hard timeout in seconds; default 1800
-- `yield_ms` (integer, optional): Milliseconds to wait before backgrounding; default 10000 (10 s). If the command finishes within this window, output is returned inline; otherwise a `session_id` is returned
-- `background` (boolean, optional): `true` to skip the wait window and immediately background the command; use for commands known to be long-running (e.g. `npm run dev`)
+Returns inline: `{exit_code, stdout, stderr}` | Backgrounded: `{session_id, output_so_far}`
 
-**Return values**:
-- Inline finish: `{ exit_code, stdout, stderr }`
-- Backgrounded: `{ session_id, output_so_far }` — follow up with `process(action=poll, session_id=...)`
-
-**Examples**:
 ```json
-// Simple command
 {"command": "ls -la /tmp"}
-
-// Run in specific directory
 {"command": "go build ./...", "workdir": "/app"}
-
-// Background a dev server immediately
 {"command": "npm run dev", "workdir": "/app", "background": true}
-
-// Pass extra env vars
 {"command": "python3 train.py", "env": {"CUDA_VISIBLE_DEVICES": "0"}, "timeout_sec": 7200}
+```
+
+**⚠️ File auto-delivery after exec** — no separate `output_file` call needed if:
+
+| Method | How | Scope |
+|--------|-----|-------|
+| A (recommended) | `print(abs_path)` in script | Any file |
+| B | Save to `output/<filename>` | Images only |
+| C (fallback) | `output_file(action=download, file_path=...)` | Any file |
+
+After A/B: exec result contains `imageSentNote` (embed markdown verbatim, don't alter URL) or `filesSentNote` (include `download_url` in reply).
+
+**⚠️ matplotlib CJK fonts — NEVER use `rcParams['font.sans-serif']`** (font cache unreliable). Use the snippet below **verbatim** — copy it to the top of every matplotlib script that contains Chinese text:
+
+```python
+import os
+import matplotlib.pyplot as plt
+from matplotlib import font_manager as _fm
+
+def _get_cn_font():
+    for p in ['/System/Library/Fonts/Hiragino Sans GB.ttc',
+              '/System/Library/Fonts/STHeiti Medium.ttc',
+              '/System/Library/Fonts/STHeiti Light.ttc',
+              '/System/Library/Fonts/PingFang.ttc',
+              '/Library/Fonts/Arial Unicode MS.ttf',
+              'C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf', 'C:/Windows/Fonts/simsun.ttc',
+              '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+              '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+              '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc']:
+        if os.path.exists(p): return _fm.FontProperties(fname=p)
+    for f in _fm.fontManager.ttflist:
+        if any(k in f.name for k in ('CJK', 'Heiti', 'YaHei', 'WenQuanYi', 'Hiragino', 'PingFang', 'STHeiti')):
+            return _fm.FontProperties(fname=f.fname)
+    return None  # fallback: use English labels
+
+def _apply_cn_font(ax, cn_font):
+    """Apply cn_font to ALL text elements of an axes — call once after setting all labels."""
+    if cn_font is None:
+        return
+    for item in ([ax.title, ax.xaxis.label, ax.yaxis.label] +
+                 ax.get_xticklabels() + ax.get_yticklabels()):
+        item.set_fontproperties(cn_font)
+    legend = ax.get_legend()
+    if legend:
+        for t in legend.get_texts():
+            t.set_fontproperties(cn_font)
+
+cn_font = _get_cn_font()
+plt.rcParams['axes.unicode_minus'] = False
+```
+
+**After setting all titles/labels/ticks on each axes, call:**
+```python
+_apply_cn_font(ax, cn_font)
+```
+
+For inline text (annotate, text, bar labels) also pass `fontproperties=cn_font`:
+```python
+ax.annotate('标注', xy=..., fontproperties=cn_font)
+ax.bar_label(bars, labels=['中文'], fontproperties=cn_font)
 ```
 
 ---
@@ -258,12 +307,14 @@ code_search(action="comby", path=".", pattern="json.Unmarshal(:[data], &:[target
 
 | action | Required parameters | Description |
 |--------|----------|------|
-| `status` | — | Returns scheduler running status |
+| `status` | — | Returns scheduler status and `running_jobs` list (job_id, started_at, elapsed_ms for each running job) |
 | `list` | — | Lists all scheduled tasks for the current user |
 | `add` | `name`, `schedule`, `message` | Create a new task |
 | `update` | `id` | Modify a task (optionally update name/schedule/message/enabled) |
 | `remove` | `id` | Delete a task |
 | `run` | `id` | Trigger once immediately (runs in background, does not wait for result) |
+| `cancel` | `id` | Send a cancellation signal to a currently-running job. Returns `{ok: true, was_running: true}` if the signal was sent, or `{ok: false, was_running: false}` if the job was not running. The goroutine exits after its current LLM call; history status transitions to `cancelled`. |
+| `history` | — | Query recent run records. Optional: `id` (filter by job), `limit` (default 20, max 100). Returns list with `status` (running/succeeded/failed/timed_out/cancelled), `started_at`, `ended_at`, `error_msg`. |
 
 **Three schedule formats**:
 - `{"kind":"cron","expr":"0 9 * * *","tz":"Asia/Shanghai"}` — Standard 5-field cron expression
@@ -286,6 +337,70 @@ code_search(action="comby", path=".", pattern="json.Unmarshal(:[data], &:[target
 
 // Single execution at Beijing time (CST) 2026-03-20 09:00
 {"action":"add","name":"Meeting Reminder","schedule":{"kind":"at","at":"2026-03-20T09:00:00+08:00"},"message":"Remind me to attend today's product review meeting"}
+```
+
+---
+
+
+## spawn_subagent
+
+Delegate a subtask to a background subagent. Returns `task_id` immediately; result auto-injected when done. Use for complex/long/parallel tasks — even a single long-running task warrants spawning.
+
+- `task` (string, required): Task prompt for the subagent
+- `label` (string): Short name shown in notifications — always set (e.g. `"分析销售数据"`)
+- `context` (string): Background info appended to subagent's prompt
+- `notify_policy`: `done_only` (default) | `state_changes` (also on start) | `silent` (never)
+- `retain_hours` (integer): Hours to retain record after terminal state; 0 = global default (~72 h)
+
+Returns: `{task_id, child_session_id, status: "queued"}`
+
+```json
+{"task": "Analyze /tmp/sales.csv, return top-10 by revenue", "label": "分析销售数据", "context": "Q1 2026 only"}
+{"task": "Scrape product prices from URL", "label": "爬取价格数据"}
+{"task": "Prepare HTML report template", "label": "准备报告模板"}
+{"task": "Send Feishu to ou_xxx: 'Report ready'", "label": "发送完成通知", "notify_policy": "silent"}
+{"task": "Run regression test suite on /app", "label": "回归测试", "notify_policy": "state_changes"}
+```
+
+---
+
+## cancel_subtask
+
+Cancel a queued/running subagent task. `force=false` (default): graceful → `cancelled` after current LLM call. `force=true`: immediate DB update → `killed`.
+
+- `task_id` (integer, required)
+- `reason` (string, optional): recorded in `error_msg`
+- `force` (boolean, optional)
+
+Returns: `{status: "cancelling"|"killed"|"<terminal>", note?}`
+
+```json
+{"task_id": 7, "reason": "User changed requirements"}
+{"task_id": 7, "force": true, "reason": "Task unresponsive"}
+```
+
+---
+
+## report_task_progress
+
+*(Subagent-only)* Write current progress to DB `progress_summary`. Lightweight — DB update only, no LLM overhead. Call after each major step. Use `notify_parent` when the parent must act immediately.
+
+- `progress` (string, required)
+
+```json
+{"progress": "Data collection complete (50 records), starting classification"}
+```
+
+---
+
+## notify_parent
+
+*(Subagent-only)* Inject a message into the parent session and trigger a new parent LLM turn — use when the parent must *act* now (critical finding, decision needed). Returns immediately; parent runs async. For routine updates use `report_task_progress`.
+
+- `message` (string, required)
+
+```json
+{"message": "Phase 1 done: 200 records, 3 anomalies found — recommend deciding whether to proceed"}
 ```
 
 ---
@@ -681,4 +796,11 @@ to construct a per-user isolated working path — never use a shared fixed path:
 11. **web_fetch first**: try before browser; use browser only when JS rendering is required.
 12. **Read files**: use read_file for all types — .docx/.pptx/.xlsx (text), .pdf (add pages="1-5" to select range or render=true for scanned), images .jpg/.png/.gif/.webp (visual analysis). Never exec/Python libs.
 13. **Write Office/PDF**: output_file(write, filename="xxx.docx/xlsx/pptx/pdf") — server converts by extension. Never exec/Python libs.
-14. **Temp dir isolation**: In LLM-direct skill steps (no script), call `get_session_info` first and use `session_id` to build an isolated path: `/tmp/{skill_id}_{session_id}/`. Never use a hardcoded shared `/tmp/xxx` path.
+14. **Files produced by exec**: Any file generated by an exec command (charts, exports, archives, reports…) is invisible until registered. Always call `output_file(action=download, file_path=<path>)` immediately after exec. For images this triggers auto-delivery and records `[N images auto-delivered]` in the subagent result; for all files it returns a `download_url` you must include in your reply. Skipping this call means the file is inaccessible to the user and parent agent.
+15. **Temp dir isolation**: In LLM-direct skill steps (no script), call `get_session_info` first and use `session_id` to build an isolated path: `/tmp/{skill_id}_{session_id}/`. Never use a hardcoded shared `/tmp/xxx` path.
+16. **spawn_subagent pattern**: Spawn when a task is complex/time-consuming, or to fan out parallel subtasks (one call per task); immediately call `notify(action=progress)`; then **stop and wait** — system injects a batch result when all tasks finish. Use `cancel_subtask` to abort; check returned `status` — if already terminal, no action needed.
+    **label**: Always pass a short label (2–8 words) for readable notifications. Without: `#7`; with: `#7「Competitor research」`.
+    **notify_policy**: `done_only` (default) when result needed; `silent` for fire-and-forget; `state_changes` for long tasks where "started" feedback matters.
+    **retain_hours**: Set only when result must survive beyond global retention (e.g. 7-day report). Leave 0 otherwise.
+    **cancel_subtask force**: Prefer `force=false` (graceful → `cancelled`); use `force=true` only when unresponsive (immediate → `killed`).
+    **Batch results**: Process all subagent results in one reply. Include `![image](url)` verbatim. If `[N images auto-delivered]`, acknowledge only — don't re-embed. Present `download_url` as a Markdown link.

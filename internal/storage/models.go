@@ -45,12 +45,40 @@ type Session struct {
 	UserID           string    `gorm:"column:user_id;index;not null"`
 	KVData           string    `gorm:"column:kv_data;type:text"`              // JSON 格式的 KV 上下文
 	Title            string    `gorm:"column:title;default:''"`               // AI 生成的会话标题（空则前端用首条消息做预览）
-	Source           string    `gorm:"column:source;default:'web'"`           // 来源：web | feishu
+	Source           string    `gorm:"column:source;default:'web'"`           // 来源：web | feishu | subagent
 	FeishuPeer       string    `gorm:"column:feishu_peer;default:''"`         // 飞书对话方 ID（open_id 或 chat_id）
 	ParentSessionID  string    `gorm:"column:parent_session_id;default:''"` // 血缘父会话（显式续话或压缩衍生时设置）
+	IsSubagent       bool      `gorm:"column:is_subagent;default:false"`      // 是否为子 agent 会话
+	SubagentTask     string    `gorm:"column:subagent_task;type:text;default:''"` // 子 agent 被分配的任务描述
 	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime"`
 	UpdatedAt        time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
+
+// SubTask 子 agent 任务表：追踪每个子 agent 任务的完整生命周期
+type SubTask struct {
+	ID              uint      `gorm:"primaryKey;autoIncrement;column:id"`
+	UserID          string    `gorm:"column:user_id;index;not null"`
+	ParentSessionID string    `gorm:"column:parent_session_id;index;not null"` // 发起方主会话
+	ChildSessionID  string    `gorm:"column:child_session_id;uniqueIndex;not null"` // 子 agent 会话
+	Runtime         string    `gorm:"column:runtime;not null;default:'subagent';index"` // 来源 runtime：subagent | cron | feishu
+	Label           string    `gorm:"column:label;default:''"` // 简短可读任务标签（由父 agent 在 spawn_subagent 时指定）
+	ParentTaskID    uint      `gorm:"column:parent_task_id;default:0;index"` // 父任务 ID（0 表示顶层任务，>0 表示嵌套子任务）
+	TaskDesc        string    `gorm:"column:task_desc;type:text"`              // 任务描述（传给子 agent 的完整 prompt）
+	Status          string    `gorm:"column:status;not null;default:'queued';index"` // queued | running | succeeded | failed | timed_out | lost | cancelled | killed
+	Result          string     `gorm:"column:result;type:text"`                 // 子 agent 最终输出（succeeded 时有值）
+	ErrorMsg        string     `gorm:"column:error_msg;type:text"`              // 失败原因（failed 时有值）
+	ProgressSummary string     `gorm:"column:progress_summary;type:text;default:''"` // 运行中进度摘要，由子 agent 主动更新
+	StartedAt       *time.Time `gorm:"column:started_at"`                       // status→running 时写入
+	EndedAt         *time.Time `gorm:"column:ended_at"`                         // 进入终态时写入
+	CleanupAfter    *time.Time `gorm:"column:cleanup_after;index"`               // 到期后允许 GC 删除；nil = 使用全局保留窗口
+	NotifyPolicy    string     `gorm:"column:notify_policy;default:'done_only'"` // 通知策略：done_only | state_changes | silent
+	NotifyStatus    string     `gorm:"column:notify_status;default:''"`          // 父会话通知投递状态：'' | session_queued | delivered | failed
+	NotifyError     string     `gorm:"column:notify_error;type:text;default:''"` // 投递失败原因
+	CreatedAt       time.Time  `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (SubTask) TableName() string { return "sub_tasks" }
 
 // TableName 指定表名
 func (Session) TableName() string { return "sessions" }
@@ -131,6 +159,23 @@ type UserData struct {
 }
 
 func (UserData) TableName() string { return "user_data" }
+
+// CronRunHistory 定时任务执行历史表：每次 cron job 触发记录一条。
+// 独立于 sub_tasks，不共享孤儿恢复/状态机/通知语义。
+type CronRunHistory struct {
+	ID        uint       `gorm:"primaryKey;autoIncrement;column:id"`
+	JobID     string     `gorm:"column:job_id;index;not null"`          // 关联 cron_jobs.id
+	UserID    string     `gorm:"column:user_id;index;not null"`
+	JobName   string     `gorm:"column:job_name;not null"`              // 冗余存储，job 删除后仍可查
+	SessionID string     `gorm:"column:session_id;not null"`            // 本次执行使用的 session
+	Status    string     `gorm:"column:status;not null;index"`          // running | succeeded | failed | timed_out
+	StartedAt time.Time  `gorm:"column:started_at;not null"`
+	EndedAt   *time.Time `gorm:"column:ended_at"`
+	ErrorMsg  string     `gorm:"column:error_msg;type:text;default:''"`
+	CreatedAt time.Time  `gorm:"column:created_at;autoCreateTime"`
+}
+
+func (CronRunHistory) TableName() string { return "cron_run_history" }
 
 // TokenUsage LLM 调用 token 消耗记录，每次 LLM 调用写一条
 type TokenUsage struct {
