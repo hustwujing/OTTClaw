@@ -163,16 +163,16 @@ func (UserData) TableName() string { return "user_data" }
 // CronRunHistory 定时任务执行历史表：每次 cron job 触发记录一条。
 // 独立于 sub_tasks，不共享孤儿恢复/状态机/通知语义。
 type CronRunHistory struct {
-	ID        uint       `gorm:"primaryKey;autoIncrement;column:id"`
-	JobID     string     `gorm:"column:job_id;index;not null"`          // 关联 cron_jobs.id
-	UserID    string     `gorm:"column:user_id;index;not null"`
-	JobName   string     `gorm:"column:job_name;not null"`              // 冗余存储，job 删除后仍可查
-	SessionID string     `gorm:"column:session_id;not null"`            // 本次执行使用的 session
-	Status    string     `gorm:"column:status;not null;index"`          // running | succeeded | failed | timed_out
-	StartedAt time.Time  `gorm:"column:started_at;not null"`
-	EndedAt   *time.Time `gorm:"column:ended_at"`
-	ErrorMsg  string     `gorm:"column:error_msg;type:text;default:''"`
-	CreatedAt time.Time  `gorm:"column:created_at;autoCreateTime"`
+	ID        uint       `gorm:"primaryKey;autoIncrement;column:id"  json:"id"`
+	JobID     string     `gorm:"column:job_id;index;not null"        json:"job_id"`
+	UserID    string     `gorm:"column:user_id;index;not null"       json:"user_id"`
+	JobName   string     `gorm:"column:job_name;not null"            json:"job_name"`
+	SessionID string     `gorm:"column:session_id;not null"          json:"session_id"`
+	Status    string     `gorm:"column:status;not null;index"        json:"status"`
+	StartedAt time.Time  `gorm:"column:started_at;not null"          json:"started_at"`
+	EndedAt   *time.Time `gorm:"column:ended_at"                     json:"ended_at"`
+	ErrorMsg  string     `gorm:"column:error_msg;type:text;default:''"  json:"error_msg"`
+	CreatedAt time.Time  `gorm:"column:created_at;autoCreateTime"    json:"created_at"`
 }
 
 func (CronRunHistory) TableName() string { return "cron_run_history" }

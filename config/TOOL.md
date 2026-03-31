@@ -130,10 +130,19 @@ Sessions expire and are automatically cleaned up after 2 hours.
 **Purpose**: Unified Feishu operations. action: `send` / `webhook` / `get_config` / `set_config`.
 
 **action: "send"** — Send via Feishu Bot API
-- `receive_id` (string, required): Recipient ID, or `"self"` to use the user's bound open_id
+
+**Most common call** (copy verbatim, replace values only):
+```json
+{"action":"send","receive_id":"self","text":"消息内容"}
+```
+
+Parameters:
+- `receive_id` (string, **required**): Recipient ID, or `"self"` to use the user's bound open_id
+- `text` (string): Text content (**required** unless `file_path` is provided)
 - `receive_id_type` (string, optional): `open_id` (default) / `user_id` / `chat_id` / `union_id`; auto-inferred from prefix when `"self"` is used
-- `text` (string): Text content (required unless `file_path` is provided)
 - `file_path` (string): Local file path; images auto-detected and uploaded
+
+**Do NOT use** `content`, `msg_type`, `payload` — these are Feishu Open API fields, not this tool's parameters. Pass the message text directly as `text="消息内容"`.
 
 **action: "webhook"** — Send to a Feishu group via Webhook URL (no Bot credentials required)
 - `webhook_url` (string, required): Feishu group custom bot Webhook URL
@@ -301,7 +310,15 @@ code_search(action="comby", path=".", pattern="json.Unmarshal(:[data], &:[target
 
 ## cron
 
-**Purpose**: Create and manage scheduled tasks. When a task is due, the system automatically creates an independent session in the background and runs the agent, sending `message` as the user message.
+**Purpose**: Create and manage scheduled tasks. When a task is due, the system automatically creates an independent session in the background and runs the agent, using `message` as the user prompt.
+
+**`message` is an agent prompt, NOT a delivery payload.**
+The agent that runs at trigger time has full access to all tools (feishu, exec, browser, etc.).
+Write `message` as a natural-language instruction describing what the agent should DO.
+→ To send a Feishu notification: write `message` as "用飞书发消息给 self：<内容>"
+→ Do NOT use `payload`, `description`, `task_type`, or `receive_id` — these parameters do not exist.
+
+**`schedule` must be a JSON object** (one of the three formats below). Never pass a raw cron string like `"0 22 * * *"`.
 
 **Action list**:
 
@@ -329,6 +346,9 @@ code_search(action="comby", path=".", pattern="json.Unmarshal(:[data], &:[target
 
 **Examples**:
 ```json
+// Every night at 22:00 — send a Feishu message to self
+{"action":"add","name":"每日22点睡觉提醒","schedule":{"kind":"cron","expr":"0 22 * * *","tz":"Asia/Shanghai"},"message":"用飞书发消息给 self：你好，该睡觉了"}
+
 // Daily reminder at 9 AM (Beijing time (CST))
 {"action":"add","name":"Morning Reminder","schedule":{"kind":"cron","expr":"0 9 * * *","tz":"Asia/Shanghai"},"message":"Please remind me of today's to-do items"}
 

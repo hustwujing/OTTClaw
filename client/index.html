@@ -2935,6 +2935,9 @@ function _histBtn(cls, label, handler) {
 function _histDisableRow(rowEl) {
   rowEl.querySelectorAll('.hist-act-btn').forEach(b => { b.disabled = true; });
 }
+function _histEnableRow(rowEl) {
+  rowEl.querySelectorAll('.hist-act-btn').forEach(b => { b.disabled = false; });
+}
 
 async function histCancelJob(jobID, rowEl) {
   _histDisableRow(rowEl);
@@ -2968,6 +2971,13 @@ async function histRunJob(jobID, rowEl) {
     const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}/run`, {
       method: 'POST', headers: { Authorization: `Bearer ${S.token}` },
     });
+    if (r.status === 404) {
+      // 404 原因多种：一次性任务执行后自动删除、任务被移除、创建失败等
+      const body = await r.json().catch(() => ({}));
+      toast('触发失败：任务已不存在（' + (body.error || '可能已被自动删除或移除') + '）', 'err');
+      _histEnableRow(rowEl);
+      return;
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     if (data.started) {
@@ -2977,7 +2987,7 @@ async function histRunJob(jobID, rowEl) {
     }
     // 记录已在 handler 中同步写入 DB，立即刷新即可（无需 setTimeout）
     histLoad();
-  } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); _histEnableRow(rowEl); histLoad(); }
 }
 
 async function histRemoveJob(jobID, rowEl) {

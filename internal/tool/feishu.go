@@ -42,13 +42,28 @@ func resolveFeishuAppID(ctx context.Context) (string, error) {
 // receive_id 传 "self" 时自动解析为当前用户绑定的飞书 open_id。
 func handleFeishuSend(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		ReceiveID     string `json:"receive_id"`
-		ReceiveIDType string `json:"receive_id_type"` // open_id | user_id | chat_id | union_id
-		Text          string `json:"text"`
-		FilePath      string `json:"file_path"` // 本地文件路径，与 text 二选一
+		ReceiveID     string          `json:"receive_id"`
+		ReceiveIDType string          `json:"receive_id_type"` // open_id | user_id | chat_id | union_id
+		Text          string          `json:"text"`
+		FilePath      string          `json:"file_path"`        // 本地文件路径，与 text 二选一
+		Content       json.RawMessage `json:"content"`          // 兼容飞书原生格式：{"text":"..."} 或 裸字符串
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parse feishu_send args: %w", err)
+	}
+	// 兼容 LLM 传入飞书 Open API 原生格式：content={"text":"..."} 或 content="plain string"
+	if args.Text == "" && len(args.Content) > 0 {
+		var contentObj struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(args.Content, &contentObj); err == nil && contentObj.Text != "" {
+			args.Text = contentObj.Text // {"text":"..."} 格式
+		} else {
+			var raw string
+			if err2 := json.Unmarshal(args.Content, &raw); err2 == nil && raw != "" {
+				args.Text = raw // 裸字符串格式
+			}
+		}
 	}
 	if args.ReceiveID == "" {
 		return "", fmt.Errorf("receive_id is required（传 \"self\" 可自动使用当前用户绑定的 user_id）")

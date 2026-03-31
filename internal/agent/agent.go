@@ -325,12 +325,14 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	toolCallIters := 0     // 有工具调用的迭代轮次数，用于判断是否触发自我进化技能生成
 	nudgeCount := 0        // 「不完整响应」nudge 次数上限，防止模型卡在同一个不完整输出反复循环
 	midStream429 := 0      // 流读取阶段 429 重试次数（最多 2 次）
+	var lastAPIUsageToks int // 上一轮 LLM 响应的精确 total tokens
+	var lastAPIMsgCount int  // 上一轮 LLM 调用时的 messages 长度（用于计算 delta）
 	tmp := llm.ChatMessage{Role: "user", Content: logUserInput(userInput)}
 	newestUsrMsg, _ := json.Marshal(tmp)
 	for iter := 0; iter < maxIterations; iter++ {
 		// 检查是否触发上下文压缩（每次 Run() 至多压缩一次）
 		if !hasCompressed {
-			if estToks := estimateTokens(messages); estToks > config.Cfg.MaxContextTokens {
+			if estToks := estimateTokensWithAnchor(messages, lastAPIUsageToks, lastAPIMsgCount); estToks > config.Cfg.MaxContextTokens {
 				logger.Debug("agent", userID, sessionID,
 					fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d",
 						estToks, config.Cfg.MaxContextTokens), 0)
@@ -395,6 +397,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		//   - 瞬时网络错误（EOF/broken pipe 等）：最多重试 1 次，500ms 后重试
 		//   - 其他错误：直接失败，显示友好文案（不暴露原始 API 错误）
 		var eventCh <-chan llm.StreamEvent
+		lastAPIMsgCount = len(messages)
 		{
 			var retries429, retriesTransient int
 			backoff429 := []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second}
@@ -454,6 +457,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}
 			if ev.Done {
 				iterUsage = ev.Usage
+				if iterUsage != nil {
+					lastAPIUsageToks = iterUsage.TotalTokens
+				}
 				break
 			}
 			if ev.TextChunk != "" {
@@ -2044,20 +2050,53 @@ func saveToolResultToKV(sessionID, key, content string) bool {
 	return true
 }
 
-// estimateTokens 粗略估算 messages 的 token 数（bytes/3，适用于中英文混合场景）
+// estimateTokens 粗略估算 messages 的 token 数。
+// - 文本内容：len/4（更接近 ASCII/JSON 的 4 bytes/token 标准）
+// - 图片 Part：固定 2000 tokens（与 Claude Code IMAGE_MAX_TOKEN_SIZE 一致）
+// - 文本 Part：len/4
+// - ToolCalls：序列化 name+arguments 后 len/4（JSON 是 ASCII 密集型）
+// - 最终乘以 4/3 保守系数，与 Claude Code estimateMessageTokens 一致
 func estimateTokens(messages []llm.ChatMessage) int {
 	maxToolBytes := config.Cfg.ToolResultMaxDBBytes
 	total := 0
 	for _, m := range messages {
+		// 文本内容
 		chars := len(m.Content)
 		// tool 消息按 DB 截断上限计算（与历史加载时一致），
 		// 避免单次大文件读取（如 read_file 读 PDF）误触发上下文压缩。
 		if m.Role == "tool" && maxToolBytes > 0 && chars > maxToolBytes {
 			chars = maxToolBytes
 		}
-		total += chars / 3
+		total += chars / 4
+
+		// 多模态 Parts（图片固定 2000，文本按字符估算）
+		for _, p := range m.Parts {
+			if p.Type == "image" {
+				total += 2000
+			} else {
+				total += len(p.Text) / 4
+			}
+		}
+
+		// 工具调用参数（assistant 发出的 tool_calls）
+		for _, tc := range m.ToolCalls {
+			total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / 4
+		}
 	}
-	return total
+	// 4/3 保守系数，与 Claude Code estimateMessageTokens 一致
+	return total * 4 / 3
+}
+
+// estimateTokensWithAnchor 使用上一轮 LLM 响应的精确 token 数作为锚点，
+// 只对锚点之后新增的消息做粗估（通常只有几条 tool result），
+// 参照 Claude Code 的 tokenCountWithEstimation 设计。
+// 首次调用（lastAPIUsageToks == 0）退化为全量 estimateTokens。
+func estimateTokensWithAnchor(messages []llm.ChatMessage, lastAPIUsageToks, lastAPIMsgCount int) int {
+	if lastAPIUsageToks > 0 && lastAPIMsgCount > 0 && lastAPIMsgCount <= len(messages) {
+		delta := messages[lastAPIMsgCount:]
+		return lastAPIUsageToks + estimateTokens(delta)
+	}
+	return estimateTokens(messages)
 }
 
 // compressHistory 当上下文超限时，调用 LLM 对旧消息生成摘要，
