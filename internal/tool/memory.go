@@ -30,12 +30,12 @@ func scanMemoryContent(content string) error {
 	for i, r := range content {
 		switch {
 		case r == '\u200B', // ZERO WIDTH SPACE
-			r == '\u200C', // ZERO WIDTH NON-JOINER
-			r == '\u200D', // ZERO WIDTH JOINER
-			r == '\uFEFF', // BOM / ZERO WIDTH NO-BREAK SPACE
-			r == '\u00AD', // SOFT HYPHEN
-			r == '\u2028', // LINE SEPARATOR
-			r == '\u2029', // PARAGRAPH SEPARATOR
+			r == '\u200C',                  // ZERO WIDTH NON-JOINER
+			r == '\u200D',                  // ZERO WIDTH JOINER
+			r == '\uFEFF',                  // BOM / ZERO WIDTH NO-BREAK SPACE
+			r == '\u00AD',                  // SOFT HYPHEN
+			r == '\u2028',                  // LINE SEPARATOR
+			r == '\u2029',                  // PARAGRAPH SEPARATOR
 			r >= '\u202A' && r <= '\u202E', // DIRECTIONAL OVERRIDES
 			r >= '\uE000' && r <= '\uF8FF', // PRIVATE USE AREA
 			unicode.Is(unicode.Cf, r) && r != '\t' && r != '\n': // 其他格式控制字符（保留 tab/newline）
@@ -76,7 +76,7 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Action  string `json:"action"`
 		Target  string `json:"target"`
-		Key     string `json:"key"`      // user_kv 专用：目标 key 名
+		Key     string `json:"key"` // user_kv 专用：目标 key 名
 		Content string `json:"content"`
 		OldText string `json:"old_text"`
 	}
@@ -151,6 +151,33 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 		entries := splitNoteEntries(current)
 		switch args.Action {
 		case "add":
+			// 近似去重：若新条目与某条现有条目的编辑距离 ≤ max(len) * dupThreshold，
+			// 视为重复，跳过写入，防止 LLM 重复触发写入导致条目膨胀。
+			const dupThreshold = 0.30 // 30% 编辑距离视为重复
+			newRunes := []rune(strings.TrimSpace(args.Content))
+			for _, e := range entries {
+				existRunes := []rune(strings.TrimSpace(e))
+				maxLen := len(newRunes)
+				if len(existRunes) > maxLen {
+					maxLen = len(existRunes)
+				}
+				if maxLen == 0 {
+					continue
+				}
+				dist := levenshtein(newRunes, existRunes)
+				if float64(dist)/float64(maxLen) <= dupThreshold {
+					b, _ := json.Marshal(map[string]any{
+						"ok":          true,
+						"target":      args.Target,
+						"action":      "add",
+						"skipped":     true,
+						"reason":      fmt.Sprintf("similar entry already exists (edit_dist=%d max_len=%d)", dist, maxLen),
+						"chars_used":  len([]rune(current)),
+						"chars_limit": charLimit,
+					})
+					return string(b), nil
+				}
+			}
 			entries = append(entries, args.Content)
 		case "replace":
 			found := false
@@ -339,6 +366,46 @@ func handleMemoryUserKV(ctx context.Context, userID, action, key, content string
 	}
 
 	return memoryError("unexpected code path"), nil
+}
+
+// levenshtein 计算两个 rune 切片之间的编辑距离（插入/删除/替换各计 1）。
+// 使用滚动双行 DP，空间复杂度 O(min(m,n))。
+func levenshtein(a, b []rune) int {
+	if len(a) < len(b) {
+		a, b = b, a // 保证 a 是较长串，b 是较短串，节省内存
+	}
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i, ra := range a {
+		curr[0] = i + 1
+		for j, rb := range b {
+			sub := prev[j]
+			if ra != rb {
+				sub++
+			}
+			del := prev[j+1] + 1
+			ins := curr[j] + 1
+			curr[j+1] = min3(sub, del, ins)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(b)]
+}
+
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
 
 // splitNoteEntries 按 § 分割笔记条目，过滤空条目

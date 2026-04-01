@@ -363,11 +363,11 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "skill",
-				Description: "Skill operations. action: load (read full SKILL.md; required before running) / run_script / read_file / write (SKILL.md or sub_path file) / delete / reload. Call get_tool_doc(\"skill\") for details.",
+				Description: "Skill operations. action: load (read full SKILL.md; required before running) / run_script / read_file / write (SKILL.md or sub_path file) / delete / reload / done (mark skill execution complete, call after delivering final output). Call get_tool_doc(\"skill\") for details.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"action":         map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_file", "write", "delete", "reload"}},
+						"action":         map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_file", "write", "delete", "reload", "done"}},
 						"skill_id":       map[string]any{"type": "string"},
 						"script_name":    map[string]any{"type": "string"},
 						"sub_path":       map[string]any{"type": "string"},
@@ -1017,7 +1017,35 @@ func handleGetSkillContent(ctx context.Context, argsJSON string) (string, error)
 			go skill.RecordSelfImprovingUse(userSkillsDir, args.SkillID, decayHours)
 		}
 	}
+	// 将当前激活的 skill ID 持久化到 session KV，
+	// 供 buildSystemPrompt 在每轮重建时自动注入完整 Skill 内容（防压缩丢失）
+	sessionID := sessionIDFromCtx(ctx)
+	if sessionID != "" {
+		if kv, err := storage.GetSessionKV(sessionID); err == nil {
+			kv["_active_skill_id"] = args.SkillID
+			_ = storage.UpdateSessionKV(sessionID, kv)
+		}
+	}
 	return content, nil
+}
+
+// handleDoneSkill 标记当前 skill 执行完成，清除 session KV 中的激活状态。
+// LLM 在 skill 的最后一步（输出最终结果后）调用此 action，
+// 避免 skill 内容持续占用系统 prompt 空间。
+func handleDoneSkill(ctx context.Context, _ string) (string, error) {
+	sessionID := sessionIDFromCtx(ctx)
+	if sessionID == "" {
+		return "Skill execution completed.", nil
+	}
+	kv, err := storage.GetSessionKV(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("get session kv: %w", err)
+	}
+	delete(kv, "_active_skill_id")
+	if err := storage.UpdateSessionKV(sessionID, kv); err != nil {
+		return "", fmt.Errorf("clear active skill: %w", err)
+	}
+	return "Skill execution completed. Active skill protection cleared.", nil
 }
 
 // handleRunScript 执行技能 script/ 目录下的脚本，返回合并后的标准输出
@@ -1592,8 +1620,10 @@ func (e *Executor) handleSkill(ctx context.Context, argsJSON string) (string, er
 		return e.handleDeleteSkill(ctx, argsJSON)
 	case "reload":
 		return e.handleReloadSkills(ctx, argsJSON)
+	case "done":
+		return handleDoneSkill(ctx, argsJSON)
 	default:
-		return "", fmt.Errorf("unknown skill action: %q (valid: load/run_script/read_file/write/delete/reload)", base.Action)
+		return "", fmt.Errorf("unknown skill action: %q (valid: load/run_script/read_file/write/delete/reload/done)", base.Action)
 	}
 }
 
