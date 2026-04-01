@@ -358,6 +358,15 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				} else if didCompress {
 					messages = compressed
 					hasCompressed = true
+					// 压缩后用最新 KV 重建系统 prompt：
+					// skill(action=load) 等工具在本 Run() 内写入了 _active_skill_id，
+					// 但 buildSystemPrompt 在循环外只调用了一次，messages[0] 尚未包含 activeSkillSection。
+					// 重建后 activeSkillSection 正确注入，避免压缩后 skill 全文保护丢失。
+					if freshKV, kvErr := storage.GetSessionKV(sessionID); kvErr == nil {
+						newPrompt, newBD := a.buildSystemPrompt(userID, freshKV, userInput, false, a.getOrLoadMemSnap(userID, sessionID), isSubagent)
+						messages[0] = llm.ChatMessage{Role: "system", Content: newPrompt}
+						promptBD = newBD
+					}
 					logger.Debug("agent", userID, sessionID,
 						fmt.Sprintf("context compressed new_tokens=%d, old_tokens=%d, did_compressed: %v", estimateTokens(messages), estToks, didCompress), 0)
 					_ = writer.WriteProgress("compress_done", "理清楚了，咱们继续…", "", time.Since(start).Milliseconds())
@@ -1077,6 +1086,21 @@ func (a *Agent) persistToolResult(userID, sessionID string, writer StreamWriter,
 			fmt.Sprintf("%s • %dms", formatToolCall(tc.Function.Name, tc.Function.Arguments), costMs),
 			tc.ID, time.Since(start).Milliseconds())
 	}
+	// skill(action=load) 的全文已持久化到系统 prompt（activeSkillSection），
+	// DB 无需重复存储全文；只写一条轻量提示，避免历史消息 token 膨胀。
+	if tc.Function.Name == "skill" {
+		var skillArgs struct {
+			Action  string `json:"action"`
+			SkillID string `json:"skill_id"`
+		}
+		if json.Unmarshal([]byte(tc.Function.Arguments), &skillArgs) == nil && skillArgs.Action == "load" {
+			dbContent = fmt.Sprintf(
+				"[skill %q full content has been loaded and persisted to the system prompt (Active Skill section). "+
+					"No need to call skill(action=load) again — follow the instructions in the Active Skill section directly.]",
+				skillArgs.SkillID,
+			)
+		}
+	}
 	// 超大工具结果：DB 只存重新获取提示，降低历史消息 token 占用；
 	// in-memory toolMsg.Content 仍保留完整结果，供本轮 LLM 正常使用。
 	if max := config.Cfg.ToolResultMaxDBBytes; max > 0 && len(dbContent) > max {
@@ -1131,8 +1155,14 @@ func (a *Agent) buildSystemPrompt(userID string, kv map[string]interface{}, user
 		if content, err := skill.Store.GetContent(userID, activeSkillID); err == nil {
 			// 注入 SKILL.md 核心内容（目录元信息头在 skill(action=load) 时实时生成，
 			// 系统 prompt 里只保留执行指令，已足够在压缩后维持 skill 行为）
-			activeSkillSection = "\n\n# Active Skill — Full Instructions (Persisted Across Compression)\n" + content +
-				"\n\nNote: When this skill is fully completed, call skill(action=done) to clear this section."
+			activeSkillSection = fmt.Sprintf(
+				"\n\n# Active Skill: %s (Full Content Already Loaded — Do NOT Call skill(action=load) Again)\n"+
+					"The following is the complete SKILL.md of skill_id=%q. "+
+					"Follow the instructions below directly without re-invoking skill(action=load).\n\n"+
+					"%s\n\n"+
+					"Note: When this skill is fully completed, call skill(action=done) to clear this section.",
+				activeSkillID, activeSkillID, content,
+			)
 		}
 	}
 
@@ -2059,9 +2089,14 @@ func buildReFetchHint(toolName, argsJSON, sessionID, fullContent string) string 
 		if path != "" {
 			return fmt.Sprintf("[内容过大已省略] 重新获取文件内容请调用 read_file(path=%q)", path)
 		}
+	case "skill":
+		if args.Action == "load" {
+			// load 结果已由 persistToolResult 提前截断，走到这里说明截断逻辑未命中（防御）
+			return "[skill content persisted to system prompt Active Skill section. Call skill(action=load) only if the Active Skill section is missing.]"
+		}
 	}
 
-	// 其他工具（process / exec_run / web_fetch / skill 等）：结果不可重新获取，
+	// 其他工具（process / exec_run / web_fetch 等）：结果不可重新获取，
 	// 存入会话 KV，引导 LLM 通过 kv(action=get) 读取完整内容。
 	if sessionID != "" && fullContent != "" {
 		kvKey := fmt.Sprintf("_tool_result_%s_%d", toolName, time.Now().UnixMilli())
