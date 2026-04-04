@@ -7,87 +7,30 @@
 package storage
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 
 	"gorm.io/gorm"
 
 	"OTTClaw/config"
 )
 
-// ── AES-GCM 加解密 ─────────────────────────────────────────────────────────────
+// ── AES-GCM 加解密（委托给 channel_crypto.go 的通用实现） ──────────────────────
 
-// deriveKey 从 FeishuEncryptKey 派生 32 字节密钥（不足补 0，超出截断）
-func deriveKey() ([]byte, error) {
-	raw := config.Cfg.FeishuEncryptKey
-	if raw == "" {
-		return nil, errors.New("FEISHU_ENCRYPT_KEY not configured")
-	}
-	key := make([]byte, 32)
-	copy(key, []byte(raw))
-	return key, nil
-}
-
-// encryptSecret AES-GCM 加密明文，返回 base64(nonce+ciphertext)
+// encryptSecret AES-GCM 加密明文（使用 FEISHU_ENCRYPT_KEY）
 func encryptSecret(plaintext string) (string, error) {
-	if plaintext == "" {
-		return "", nil
+	if config.Cfg.FeishuEncryptKey == "" {
+		return "", errors.New("FEISHU_ENCRYPT_KEY not configured")
 	}
-	key, err := deriveKey()
-	if err != nil {
-		return "", err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("new gcm: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", fmt.Errorf("rand nonce: %w", err)
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(sealed), nil
+	return EncryptSecret(plaintext, config.Cfg.FeishuEncryptKey)
 }
 
 // decryptSecret 解密 encryptSecret 返回的 base64 字符串
 func decryptSecret(enc string) (string, error) {
-	if enc == "" {
-		return "", nil
+	if config.Cfg.FeishuEncryptKey == "" {
+		return "", errors.New("FEISHU_ENCRYPT_KEY not configured")
 	}
-	key, err := deriveKey()
-	if err != nil {
-		return "", err
-	}
-	data, err := base64.StdEncoding.DecodeString(enc)
-	if err != nil {
-		return "", fmt.Errorf("base64 decode: %w", err)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("new gcm: %w", err)
-	}
-	ns := gcm.NonceSize()
-	if len(data) < ns {
-		return "", errors.New("ciphertext too short")
-	}
-	plain, err := gcm.Open(nil, data[:ns], data[ns:], nil)
-	if err != nil {
-		return "", fmt.Errorf("gcm open: %w", err)
-	}
-	return string(plain), nil
+	return DecryptSecret(enc, config.Cfg.FeishuEncryptKey)
 }
 
 // ── DB CRUD ────────────────────────────────────────────────────────────────────

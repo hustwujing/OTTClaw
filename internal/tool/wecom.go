@@ -16,18 +16,19 @@ import (
 	"OTTClaw/internal/wecom"
 )
 
-// handleWeComSend 通过企业微信群机器人 Webhook 发送消息
+// handleWeComSend 通过企业微信群机器人 Webhook 发送消息（文本、Markdown、图片、文件）
 func handleWeComSend(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		WebhookURL string `json:"webhook_url"`
 		Text       string `json:"text"`
-		MsgType    string `json:"msgtype"` // "text"（默认）或 "markdown"
+		MsgType    string `json:"msgtype"`   // "text"（默认）或 "markdown"
+		FilePath   string `json:"file_path"` // 本地文件路径，与 text 二选一
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parse wecom_send args: %w", err)
 	}
-	if args.Text == "" {
-		return "", fmt.Errorf("text is required")
+	if args.Text == "" && args.FilePath == "" {
+		return "", fmt.Errorf("text or file_path is required")
 	}
 
 	// 未指定 webhook_url 时从存储读取
@@ -47,6 +48,25 @@ func handleWeComSend(ctx context.Context, argsJSON string) (string, error) {
 		webhookURL = cfg.WebhookURL
 	}
 
+	// 发送文件/图片
+	if args.FilePath != "" {
+		var err error
+		if isImagePath(args.FilePath) {
+			err = wecom.SendImage(ctx, webhookURL, args.FilePath)
+		} else {
+			err = wecom.SendFile(ctx, webhookURL, args.FilePath)
+		}
+		if err != nil {
+			return "", fmt.Errorf("send wecom file: %w", err)
+		}
+		// 文件发完后可追加文字
+		if args.Text != "" {
+			_ = wecom.SendText(ctx, webhookURL, args.Text)
+		}
+		return `"ok"`, nil
+	}
+
+	// 发送文本/Markdown
 	var err error
 	if args.MsgType == "markdown" {
 		err = wecom.SendMarkdown(ctx, webhookURL, args.Text)
@@ -86,7 +106,7 @@ func handleGetWeComConfig(ctx context.Context, _ string) (string, error) {
 }
 
 // handleWecom 通过 action 字段分发到各企业微信操作处理器，替代 3 个独立工具。
-// action: send / get_config / set_config
+// action: send / get_config / set_config / set_bot_config / get_bot_config
 func handleWecom(ctx context.Context, argsJSON string) (string, error) {
 	var base struct {
 		Action string `json:"action"`
@@ -101,8 +121,12 @@ func handleWecom(ctx context.Context, argsJSON string) (string, error) {
 		return handleGetWeComConfig(ctx, argsJSON)
 	case "set_config":
 		return handleSetWeComConfig(ctx, argsJSON)
+	case "set_bot_config":
+		return handleSetWeComBotConfig(ctx, argsJSON)
+	case "get_bot_config":
+		return handleGetWeComBotConfig(ctx, argsJSON)
 	default:
-		return "", fmt.Errorf("unknown wecom action: %q (valid: send/get_config/set_config)", base.Action)
+		return "", fmt.Errorf("unknown wecom action: %q (valid: send/get_config/set_config/set_bot_config/get_bot_config)", base.Action)
 	}
 }
 
@@ -130,5 +154,57 @@ func handleSetWeComConfig(ctx context.Context, argsJSON string) (string, error) 
 		"status":      "ok",
 		"webhook_url": maskURL(args.WebhookURL),
 	})
+	return string(b), nil
+}
+
+// handleSetWeComBotConfig 保存企微 AI 机器人 Bot ID + Secret（加密存储），并热重启长连接
+func handleSetWeComBotConfig(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		BotID  string `json:"bot_id"`
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", fmt.Errorf("parse set_bot_config args: %w", err)
+	}
+	if args.BotID == "" || args.Secret == "" {
+		return "", fmt.Errorf("bot_id and secret are required")
+	}
+
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		return "", fmt.Errorf("user_id not found in context")
+	}
+	if err := storage.SetWeComBotConfig(userID, args.BotID, args.Secret); err != nil {
+		return "", fmt.Errorf("save wecom bot config: %w", err)
+	}
+
+	// 热重启该用户的长连接；用 Background ctx 保证连接生命周期不受请求 ctx 影响
+	if reg := wecom.GetRegistry(); reg != nil {
+		reg.StartForUser(context.Background(), userID)
+	}
+
+	b, _ := json.Marshal(map[string]any{
+		"status": "ok",
+		"bot_id": args.BotID,
+	})
+	return string(b), nil
+}
+
+// handleGetWeComBotConfig 查询当前用户企微 AI 机器人配置状态
+func handleGetWeComBotConfig(ctx context.Context, _ string) (string, error) {
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		return "", fmt.Errorf("user_id not found in context")
+	}
+	botID, err := storage.GetWeComBotConfig(userID)
+	if err != nil {
+		return "", fmt.Errorf("get wecom bot config: %w", err)
+	}
+
+	result := map[string]any{
+		"configured": botID != "",
+		"bot_id":     botID,
+	}
+	b, _ := json.Marshal(result)
 	return string(b), nil
 }

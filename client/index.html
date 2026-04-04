@@ -135,8 +135,12 @@ header {
   z-index: 10;
 }
 .h-title {
-  flex: 1; font-size: .9375rem; font-weight: 600;
+  flex: 1; min-width: 0; font-size: .9375rem; font-weight: 600;
   display: flex; align-items: center; gap: 8px;
+  overflow: hidden;
+}
+#app-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -260,6 +264,11 @@ header {
   font-variant-numeric: tabular-nums;
   font-weight: 600; color: var(--text);
   font-size: .75rem;
+}
+.tok-cache-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500; color: var(--muted);
+  font-size: .72rem;
 }
 
 /* ── Chat column ─────────────────────────────────────────────────── */
@@ -984,6 +993,12 @@ footer {
       <div class="sidebar-foot">
         <div class="tok-row"><span>输入 Token</span><span id="tok-in" class="tok-val">—</span></div>
         <div class="tok-row"><span>输出 Token</span><span id="tok-out" class="tok-val">—</span></div>
+        <div class="tok-row" id="tok-cache-read-row" style="display:none">
+          <span style="color:var(--accent)">⚡ 缓存命中</span><span id="tok-cache-read" class="tok-cache-val">—</span>
+        </div>
+        <div class="tok-row" id="tok-cache-create-row" style="display:none">
+          <span>&nbsp;&nbsp;└ 缓存写入</span><span id="tok-cache-create" class="tok-cache-val">—</span>
+        </div>
       </div>
     </aside>
 
@@ -1151,8 +1166,10 @@ const S = {
 };
 
 // Token 计数器动画状态（输入/输出各自独立）
-const TOK_IN  = { rafId: null, displayed: null };
-const TOK_OUT = { rafId: null, displayed: null };
+const TOK_IN         = { rafId: null, displayed: null };
+const TOK_OUT        = { rafId: null, displayed: null };
+const TOK_CACHE_READ = { rafId: null, displayed: null };
+const TOK_CACHE_CRT  = { rafId: null, displayed: null };
 // 最后一次收到 stream 数据的时间（毫秒），用于检测 >6s 的 stream 间隔
 let lastStreamDataTime = 0;
 
@@ -1226,9 +1243,15 @@ async function fetchTokenUsage() {
       headers: { Authorization: `Bearer ${S.token}` },
     });
     if (!r.ok) return;
-    const { prompt_tokens, completion_tokens } = await r.json();
+    const { prompt_tokens, completion_tokens, cache_read_tokens = 0, cache_creation_tokens = 0 } = await r.json();
     animateToken(TOK_IN,  document.getElementById('tok-in'),  prompt_tokens);
     animateToken(TOK_OUT, document.getElementById('tok-out'), completion_tokens);
+    if (cache_read_tokens > 0 || cache_creation_tokens > 0) {
+      document.getElementById('tok-cache-read-row').style.display   = '';
+      document.getElementById('tok-cache-create-row').style.display = '';
+      animateToken(TOK_CACHE_READ, document.getElementById('tok-cache-read'),   cache_read_tokens);
+      animateToken(TOK_CACHE_CRT,  document.getElementById('tok-cache-create'), cache_creation_tokens);
+    }
   } catch { /* ignore */ }
 }
 
@@ -1735,6 +1758,24 @@ function showInteractive(bubble, kind, data) {
       skipBtn.onclick = () => { disable(); resolve('skip'); };
       row.appendChild(preview); row.appendChild(pickBtn); row.appendChild(skipBtn);
       wrap.appendChild(fileInput); wrap.appendChild(row);
+
+    } else if (kind === 'qrcode') {
+      const msg = el('div', 'ia-title');
+      msg.textContent = data.message || '请扫描二维码';
+      wrap.appendChild(msg);
+      if (data.image) {
+        const img = document.createElement('img');
+        img.src = data.image;
+        img.alt = '二维码';
+        img.style.cssText = 'max-width:240px;border-radius:8px;margin:12px 0;';
+        wrap.appendChild(img);
+      } else if (data.url) {
+        const a = document.createElement('a');
+        a.href = data.url; a.target = '_blank'; a.textContent = '👉 点击打开二维码链接';
+        a.style.cssText = 'color:#2563eb;text-decoration:underline;display:block;margin:12px 0;';
+        wrap.appendChild(a);
+      }
+      resolve(null);
 
     } else {
       resolve(null); return;

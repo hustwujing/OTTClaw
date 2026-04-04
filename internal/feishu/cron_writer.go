@@ -15,25 +15,22 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
+	"OTTClaw/internal/channel"
 	"OTTClaw/internal/logger"
 )
 
-// FeishuCronWriter 实现 StreamWriter，将定时任务最终结果以主动消息推送到飞书对话。
+// FeishuCronWriter 实现 channel.StreamWriter，将定时任务最终结果以主动消息推送到飞书对话。
 type FeishuCronWriter struct {
+	channel.BaseWriter // textBuf, finalized, WriteText, WriteEnd, WriteError, Close
+
 	appID         string
 	peer          string
 	receiveIDType string
-	ownerUserID   string
 	jobName       string
 	startTime     time.Time
-
-	mu            sync.Mutex
-	progressMsgID string          // 初始卡片的 message_id，用于 PATCH 更新
-	textBuf       strings.Builder // 收集 LLM 文字输出，供 WriteEnd 发送
-	finalized     bool            // 防止 WriteEnd / WriteError 重复执行
+	progressMsgID string // 初始卡片的 message_id，用于 PATCH 更新
 }
 
 // NewCronWriter 创建 FeishuCronWriter，并立即向用户对话发送初始"执行中"卡片。
@@ -43,10 +40,11 @@ func NewCronWriter(ownerUserID, peer, appID, receiveIDType, jobName string) *Fei
 		appID:         appID,
 		peer:          peer,
 		receiveIDType: receiveIDType,
-		ownerUserID:   ownerUserID,
 		jobName:       jobName,
 		startTime:     time.Now(),
 	}
+	w.BaseWriter.OwnerUserID = ownerUserID
+
 	initialText := fmt.Sprintf("⏰ **定时任务执行中**\n%s\n\n*正在后台运行…*", jobName)
 	msgID, err := SendCardGetID(appID, peer, receiveIDType, initialText)
 	if err != nil {
@@ -55,15 +53,42 @@ func NewCronWriter(ownerUserID, peer, appID, receiveIDType, jobName string) *Fei
 	} else {
 		w.progressMsgID = msgID
 	}
+
+	// 注入飞书专属 SendFn：生成带耗时的最终卡片文本并发送
+	w.BaseWriter.SendFn = w.doSendFinal
 	return w
 }
 
-// WriteText 累积 LLM 文字输出。
-func (w *FeishuCronWriter) WriteText(text string) error {
-	w.mu.Lock()
-	w.textBuf.WriteString(text)
-	w.mu.Unlock()
-	return nil
+// doSendFinal 是注入到 BaseWriter.SendFn 的飞书专属发送逻辑
+func (w *FeishuCronWriter) doSendFinal(text string) {
+	// 移除飞书不支持的图片 Markdown 语法
+	text = strings.TrimSpace(mdImageRe.ReplaceAllString(text, ""))
+	elapsed := time.Since(w.startTime).Round(time.Second)
+
+	// 判断是否为错误（WriteError 已在调用方添加 "❌ " 前缀）
+	var finalText string
+	if strings.HasPrefix(text, "❌ ") {
+		body := strings.TrimPrefix(text, "❌ ")
+		if body == "" {
+			body = "未知错误"
+		}
+		finalText = fmt.Sprintf("❌ **定时任务失败** (%s)\n%s\n\n%s", elapsed, w.jobName, body)
+	} else {
+		if text == "" || text == "✅ 已完成" {
+			text = "✅ 任务已完成"
+		}
+		finalText = fmt.Sprintf("✅ **定时任务完成** (%s)\n%s\n\n%s", elapsed, w.jobName, text)
+	}
+
+	if w.progressMsgID != "" {
+		if err := UpdateCard(w.appID, w.progressMsgID, finalText); err != nil {
+			logger.Warn("feishu-cron", w.OwnerUserID, "",
+				fmt.Sprintf("update cron card: %v", err), 0)
+			_ = SendTextTo(w.appID, w.peer, w.receiveIDType, finalText)
+		}
+	} else {
+		_ = SendTextTo(w.appID, w.peer, w.receiveIDType, finalText)
+	}
 }
 
 // WriteProgress 不推送中间进度：定时任务只交付最终结果。
@@ -88,60 +113,5 @@ func (w *FeishuCronWriter) WriteImage(url string) error {
 	return SendImageTo(w.appID, w.peer, w.receiveIDType, imageKey)
 }
 
-// WriteEnd 将完整 LLM 输出更新到初始卡片作为最终回复。
-func (w *FeishuCronWriter) WriteEnd() error {
-	w.mu.Lock()
-	text := w.textBuf.String()
-	w.mu.Unlock()
-	w.sendFinal(text, false)
-	return nil
-}
-
-// WriteError 将错误信息更新到初始卡片。
-func (w *FeishuCronWriter) WriteError(msg string) error {
-	w.sendFinal(msg, true)
-	return nil
-}
-
-// sendFinal 幂等：只执行一次，重复调用无效。
-func (w *FeishuCronWriter) sendFinal(text string, isError bool) {
-	w.mu.Lock()
-	if w.finalized {
-		w.mu.Unlock()
-		return
-	}
-	w.finalized = true
-	msgID := w.progressMsgID
-	w.mu.Unlock()
-
-	// 移除飞书不支持的图片 Markdown 语法
-	text = strings.TrimSpace(mdImageRe.ReplaceAllString(text, ""))
-	elapsed := time.Since(w.startTime).Round(time.Second)
-
-	var finalText string
-	if isError {
-		if text == "" {
-			text = "未知错误"
-		}
-		finalText = fmt.Sprintf("❌ **定时任务失败** (%s)\n%s\n\n%s", elapsed, w.jobName, text)
-	} else {
-		if text == "" {
-			text = "✅ 任务已完成"
-		}
-		finalText = fmt.Sprintf("✅ **定时任务完成** (%s)\n%s\n\n%s", elapsed, w.jobName, text)
-	}
-
-	if msgID != "" {
-		if err := UpdateCard(w.appID, msgID, finalText); err != nil {
-			logger.Warn("feishu-cron", w.ownerUserID, "",
-				fmt.Sprintf("update cron card: %v", err), 0)
-			// 降级：发送新消息
-			_ = SendTextTo(w.appID, w.peer, w.receiveIDType, finalText)
-		}
-	} else {
-		_ = SendTextTo(w.appID, w.peer, w.receiveIDType, finalText)
-	}
-}
-
-// 编译期检查：FeishuCronWriter 必须实现 StreamWriter 接口。
-var _ StreamWriter = (*FeishuCronWriter)(nil)
+// 编译期检查：FeishuCronWriter 必须实现 channel.StreamWriter 接口。
+var _ channel.StreamWriter = (*FeishuCronWriter)(nil)

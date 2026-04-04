@@ -16,6 +16,18 @@ PID_FILE="$ROOT_DIR/run/server.pid"
 
 # ---- 清理残留的 browser-server 子进程 ----
 _cleanup_browser_server() {
+  local bs_pid_file="$ROOT_DIR/run/browser-server.pid"
+  # 优先用 PID 文件精确停止
+  if [ -f "$bs_pid_file" ]; then
+    local bs_pid
+    bs_pid="$(tr -d '[:space:]' < "$bs_pid_file")"
+    if [ -n "$bs_pid" ] && kill -0 "$bs_pid" 2>/dev/null; then
+      echo "[stop] 停止 browser-server，PID=$bs_pid"
+      kill "$bs_pid" 2>/dev/null || true
+    fi
+    rm -f "$bs_pid_file"
+  fi
+  # 兜底：用 pgrep 查杀残留进程
   local pids
   pids=$(pgrep -f "node.*browser-server/server\.js" 2>/dev/null || true)
   if [ -n "$pids" ]; then

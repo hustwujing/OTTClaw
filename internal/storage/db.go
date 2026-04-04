@@ -58,7 +58,7 @@ func InitDB() error {
 	}
 
 	// 自动建表 / 更新表结构
-	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &CronJob{}, &UserProfile{}, &UserData{}, &TokenUsage{}, &OriginSessionMessage{}, &SubTask{}, &CronRunHistory{}); err != nil {
+	if err := db.AutoMigrate(&InviteCode{}, &Session{}, &SessionMessage{}, &ToolRequest{}, &FeishuConfig{}, &WeComConfig{}, &WeixinConfig{}, &CronJob{}, &UserProfile{}, &UserData{}, &TokenUsage{}, &OriginSessionMessage{}, &SubTask{}, &CronRunHistory{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 
@@ -553,29 +553,36 @@ func CountUserData(userID string) (int64, error) {
 
 // UserTokenSummary 用户 token 消耗汇总
 type UserTokenSummary struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
+	PromptTokens        int64 `json:"prompt_tokens"`
+	CompletionTokens    int64 `json:"completion_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
 }
 
-// GetUserTokenSummary 统计指定用户的历史 token 消耗（分输入/输出）
+// GetUserTokenSummary 统计指定用户的历史 token 消耗（分输入/输出/缓存）
 func GetUserTokenSummary(userID string) (UserTokenSummary, error) {
 	var s UserTokenSummary
 	err := DB.Model(&TokenUsage{}).
 		Where("user_id = ?", userID).
-		Select("COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, COALESCE(SUM(completion_tokens), 0) AS completion_tokens").
+		Select("COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
+			"COALESCE(SUM(completion_tokens), 0) AS completion_tokens, " +
+			"COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, " +
+			"COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens").
 		Scan(&s).Error
 	return s, err
 }
 
 // AddTokenUsage 写入一条 LLM token 消耗记录
-func AddTokenUsage(userID, sessionID, model string, prompt, completion int) error {
+func AddTokenUsage(userID, sessionID, model string, prompt, completion, cacheRead, cacheCreation int) error {
 	return DB.Create(&TokenUsage{
-		UserID:           userID,
-		SessionID:        sessionID,
-		Model:            model,
-		PromptTokens:     prompt,
-		CompletionTokens: completion,
-		TotalTokens:      prompt + completion,
+		UserID:              userID,
+		SessionID:           sessionID,
+		Model:               model,
+		PromptTokens:        prompt,
+		CompletionTokens:    completion,
+		TotalTokens:         prompt + completion,
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheCreation,
 	}).Error
 }
 

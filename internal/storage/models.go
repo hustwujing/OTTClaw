@@ -96,14 +96,29 @@ type FeishuConfig struct {
 func (FeishuConfig) TableName() string { return "feishu_configs" }
 
 // WeComConfig 企业微信机器人配置表，每个用户独立一份
-// 企微仅支持群机器人 Webhook，无需 Bot 凭证
+// webhook_url：群机器人 Webhook（push-only）
+// bot_id + secret_enc：AI 机器人双向长连接（接收+发送）
 type WeComConfig struct {
 	UserID     string    `gorm:"primaryKey;column:user_id"`
-	WebhookURL string    `gorm:"column:webhook_url;type:text;default:''"` // 群机器人 Webhook URL
+	WebhookURL string    `gorm:"column:webhook_url;type:text;default:''"` // 群机器人 Webhook URL（push-only）
+	BotID      string    `gorm:"column:bot_id;default:''"`                // AI 机器人 Bot ID
+	SecretEnc  string    `gorm:"column:secret_enc;type:text;default:''"`  // AES-GCM 加密后的 Bot Secret
 	UpdatedAt  time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 func (WeComConfig) TableName() string { return "wecom_configs" }
+
+// WeixinConfig 微信个人号配置表
+type WeixinConfig struct {
+	UserID             string    `gorm:"primaryKey;column:user_id"`
+	TokenEnc           string    `gorm:"column:token_enc;type:text;default:''"`
+	BaseURL            string    `gorm:"column:base_url;type:text;default:''"`
+	BotID              string    `gorm:"column:bot_id;default:''"`
+	OwnerIlinkUserID   string    `gorm:"column:owner_ilink_user_id;default:''"` // QR 登录 confirmed 时的 ilink_user_id，用于 getconfig 获取 context_token
+	UpdatedAt          time.Time `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (WeixinConfig) TableName() string { return "weixin_configs" }
 
 // SessionMessage 消息历史表，保存完整对话记录
 type SessionMessage struct {
@@ -179,14 +194,16 @@ func (CronRunHistory) TableName() string { return "cron_run_history" }
 
 // TokenUsage LLM 调用 token 消耗记录，每次 LLM 调用写一条
 type TokenUsage struct {
-	ID               uint      `gorm:"primaryKey;autoIncrement;column:id"`
-	UserID           string    `gorm:"column:user_id;index;not null"`
-	SessionID        string    `gorm:"column:session_id;index"`
-	Model            string    `gorm:"column:model"`
-	PromptTokens     int       `gorm:"column:prompt_tokens"`
-	CompletionTokens int       `gorm:"column:completion_tokens"`
-	TotalTokens      int       `gorm:"column:total_tokens"`
-	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime"`
+	ID                  uint      `gorm:"primaryKey;autoIncrement;column:id"`
+	UserID              string    `gorm:"column:user_id;index;not null"`
+	SessionID           string    `gorm:"column:session_id;index"`
+	Model               string    `gorm:"column:model"`
+	PromptTokens        int       `gorm:"column:prompt_tokens"`
+	CompletionTokens    int       `gorm:"column:completion_tokens"`
+	TotalTokens         int       `gorm:"column:total_tokens"`
+	CacheReadTokens     int       `gorm:"column:cache_read_tokens;default:0"`     // Anthropic cache_read_input_tokens / OpenAI cached_tokens
+	CacheCreationTokens int       `gorm:"column:cache_creation_tokens;default:0"` // Anthropic cache_creation_input_tokens
+	CreatedAt           time.Time `gorm:"column:created_at;autoCreateTime"`
 }
 
 func (TokenUsage) TableName() string { return "token_usages" }

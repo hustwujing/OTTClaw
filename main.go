@@ -22,6 +22,7 @@ import (
 	"OTTClaw/config"
 	"OTTClaw/internal/agent"
 	"OTTClaw/internal/browser"
+	"OTTClaw/internal/channel"
 	"OTTClaw/internal/cron"
 	"OTTClaw/internal/feishu"
 	"OTTClaw/internal/handler"
@@ -32,6 +33,8 @@ import (
 	"OTTClaw/internal/skill"
 	"OTTClaw/internal/storage"
 	"OTTClaw/internal/tool"
+	"OTTClaw/internal/wecom"
+	"OTTClaw/internal/weixin"
 )
 
 func main() {
@@ -195,24 +198,43 @@ func main() {
 	// 生成文件静态访问：GET /output/{dir}/{filename}（供前端内联展示图片等）
 	r.Static("/output", config.Cfg.OutputDir)
 
-	// ---- 5. 注入 agent runner 到 feishu 包，并启动长连接 ----
-	feishu.SetAgentRunner(func(ctx context.Context, userID, sessionID, userText string, writer feishu.StreamWriter) error {
-		defer runtrack.Default.Register("feishu", userID, sessionID)()
-		// /subagents spawn <task> 命令：绕过 LLM，直接派发子 agent
-		if task, ok := agent.ParseSpawnCmd(userText); ok {
-			taskID, _, spawnErr := agent.Get().SpawnSubagentCmd(ctx, userID, sessionID, task)
-			if spawnErr != nil {
-				_ = writer.WriteError(fmt.Sprintf("子 agent 派发失败：%v", spawnErr))
-			} else {
-				_ = writer.WriteText(agent.SpawnCmdText(task, taskID))
+	// ---- 5 & 6. 统一启动飞书和企微渠道 ----
+	// makeRunner 创建通用 AgentRunFunc：各渠道共享相同的 runner 逻辑
+	makeRunner := func(source string) channel.AgentRunFunc {
+		return func(ctx context.Context, userID, sessionID, userText string, writer channel.StreamWriter) error {
+			defer runtrack.Default.Register(source, userID, sessionID)()
+			// /subagents spawn <task> 命令：绕过 LLM，直接派发子 agent
+			if task, ok := agent.ParseSpawnCmd(userText); ok {
+				taskID, _, spawnErr := agent.Get().SpawnSubagentCmd(ctx, userID, sessionID, task)
+				if spawnErr != nil {
+					_ = writer.WriteError(fmt.Sprintf("子 agent 派发失败：%v", spawnErr))
+				} else {
+					_ = writer.WriteText(agent.SpawnCmdText(task, taskID))
+				}
+				_ = writer.WriteEnd()
+				return spawnErr
 			}
-			_ = writer.WriteEnd()
-			return spawnErr
+			return agent.Get().Run(ctx, userID, sessionID, userText, writer)
 		}
-		return agent.Get().Run(ctx, userID, sessionID, userText, writer)
-	})
-	go feishu.Registry.StartAll(context.Background())
+	}
+
+	feishuReg := channel.NewRegistry(&feishu.FeishuAdapter{})
+	feishuReg.SetAgentRunner(makeRunner("feishu"))
+	feishu.SetRegistry(feishuReg)
+	go feishuReg.StartAll(context.Background())
 	logger.Info("main", "", "", "feishu registry started", 0)
+
+	wecomReg := channel.NewRegistry(&wecom.WeComAdapter{})
+	wecomReg.SetAgentRunner(makeRunner("wecom"))
+	wecom.SetRegistry(wecomReg)
+	go wecomReg.StartAll(context.Background())
+	logger.Info("main", "", "", "wecom registry started", 0)
+
+	weixinReg := channel.NewRegistry(&weixin.WeixinAdapter{})
+	weixinReg.SetAgentRunner(makeRunner("weixin"))
+	weixin.SetRegistry(weixinReg)
+	go weixinReg.StartAll(context.Background())
+	logger.Info("main", "", "", "weixin registry started", 0)
 
 	addr := ":" + config.Cfg.ServerPort
 	logger.Info("main", "", "", "server starting on "+addr, 0)
@@ -262,8 +284,10 @@ func main() {
 	<-quit
 	logger.Info("main", "", "", "shutdown signal received, draining...", 0)
 
-	// 停止所有飞书长连接（阻止新的 agent 调用，让进行中的 runAgent 靠 botCtx 取消）
-	feishu.Registry.StopAll()
+	// 停止所有飞书/企微长连接（阻止新的 agent 调用，让进行中的 runner 靠 botCtx 取消）
+	feishuReg.StopAll()
+	wecomReg.StopAll()
+	weixinReg.StopAll()
 
 	// agent.Shutdown() 和 srv.Shutdown() 必须并行：
 	// agent.Shutdown() 第一步关闭 shutdownCh，通知 SSE handler 取消 agentCtx；

@@ -260,6 +260,7 @@ func New() *Executor {
 	e.register("process", handleProcess)
 	e.register("feishu", handleFeishu) // 合并自 feishu_send / feishu_webhook / get_feishu_config / set_feishu_config
 	e.register("wecom", handleWecom)   // 合并自 wecom_send / get_wecom_config / set_wecom_config
+	e.register("weixin", handleWeixin) // 微信个人号：bind / status / unbind / send
 	e.register("browser", handleBrowser)
 	e.register("web_fetch", handleWebFetch)
 	e.register("code_search", handleCodeSearch)
@@ -545,14 +546,34 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "wecom",
-				Description: "WeCom operations. action: send (Webhook, msgtype text/markdown, omit webhook_url to use stored) / get_config (read masked URL) / set_config (save Webhook URL).",
+				Description: "WeCom operations. action: send (Webhook push, supports text/markdown/image/file) / get_config / set_config / set_bot_config / get_bot_config.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"action":      map[string]any{"type": "string", "enum": []string{"send", "get_config", "set_config"}},
-						"text":        map[string]any{"type": "string", "description": "send: message content"},
+						"action":      map[string]any{"type": "string", "enum": []string{"send", "get_config", "set_config", "set_bot_config", "get_bot_config"}},
+						"text":        map[string]any{"type": "string", "description": "send: text or markdown content"},
 						"msgtype":     map[string]any{"type": "string", "enum": []string{"text", "markdown"}, "description": "send: default text"},
+						"file_path":   map[string]any{"type": "string", "description": "send: local file path — image (jpg/png/gif/webp, ≤2MB) sent as base64; other types uploaded via media API"},
 						"webhook_url": map[string]any{"type": "string", "description": "send: optional (uses stored if omitted); set_config: required"},
+						"bot_id":      map[string]any{"type": "string", "description": "set_bot_config: WeCom AI bot ID (format: botid_...)"},
+						"secret":      map[string]any{"type": "string", "description": "set_bot_config: WeCom AI bot secret (stored encrypted)"},
+					},
+					"required": []string{"action"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "weixin",
+				Description: "微信个人号绑定与消息收发（支持文本、图片、文件）。action: bind/status/unbind/send。【发消息工作流】：① 先调 status 检查是否已绑定且在线；② 若未绑定(bound=false)先调 bind 发起扫码；③ 已绑定后调 send，to 填目标微信 ID。status 返回的 owner_weixin_id 是用户自己绑定的微信账号 ID，发给自己时直接用它。【收消息】图片/文件会自动下载，路径以 [文件: /path] 附在消息里，可用 read_file 读取。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"action": map[string]any{"type": "string", "enum": []string{"bind", "status", "unbind", "send"}},
+						"to":     map[string]any{"type": "string", "description": "send 必填：目标微信用户 ID。发给用户自己时填 status 返回的 owner_weixin_id"},
+						"text":   map[string]any{"type": "string", "description": "send：文字消息内容（与 file 二选一或同时使用）"},
+						"file":   map[string]any{"type": "string", "description": "send：发送图片或文件，填本地路径（/uploads/... 或绝对路径）或公开 URL；扩展名为 jpg/png/gif/webp 等会作为图片发送，其他作为文件发送"},
 					},
 					"required": []string{"action"},
 				},

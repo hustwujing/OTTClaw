@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"OTTClaw/config"
+	"OTTClaw/internal/logger"
 )
 
 // ----- 请求结构（OpenAI 专用）-----
@@ -59,11 +60,21 @@ func toOpenAIMessages(messages []ChatMessage) []openAIMessage {
 			}
 			msg.Content = parts
 		} else {
-			msg.Content = m.Content
+			content := m.Content
+			if m.Role == "system" {
+				content = strings.ReplaceAll(content, CacheBreakMarker, "")
+			}
+			msg.Content = content
 		}
 		result = append(result, msg)
 	}
 	return result
+}
+
+// glmContextRef GLM 显式缓存引用（注入 openAIRequest.Context）
+type glmContextRef struct {
+	Type string `json:"type"` // "cache"
+	ID   string `json:"id"`
 }
 
 // openAIRequest Chat Completions 请求体
@@ -76,6 +87,10 @@ type openAIRequest struct {
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
+	// 显式 context cache（各 provider 格式不同，omitempty 防止影响其他 provider）
+	Context        *glmContextRef `json:"context,omitempty"`          // GLM
+	ContextCacheID string         `json:"context_cache_id,omitempty"` // Doubao
+	CacheID        string         `json:"cache_id,omitempty"`         // Qwen
 }
 
 // ----- 响应结构（流式 chunk 解析）-----
@@ -99,10 +114,15 @@ type openAIChoice struct {
 	FinishReason string      `json:"finish_reason"`
 }
 
+type openAIPromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                         `json:"prompt_tokens"`
+	CompletionTokens    int                         `json:"completion_tokens"`
+	TotalTokens         int                         `json:"total_tokens"`
+	PromptTokensDetails *openAIPromptTokensDetails  `json:"prompt_tokens_details,omitempty"`
 }
 
 type openAIChunk struct {
@@ -215,6 +235,7 @@ func (c *openAIClient) doStream(ctx context.Context, messages []ChatMessage, too
 	if c.maxTokens > 0 {
 		req.MaxTokens = c.maxTokens
 	}
+	c.injectExplicitCache(ctx, &req, messages)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -278,6 +299,7 @@ func (c *openAIClient) doSyncFallback(ctx context.Context, messages []ChatMessag
 	if c.maxTokens > 0 {
 		req.MaxTokens = c.maxTokens
 	}
+	c.injectExplicitCache(ctx, &req, messages)
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal sync-fallback request: %w", err)
@@ -307,6 +329,93 @@ func (c *openAIClient) doSyncFallback(ctx context.Context, messages []ChatMessag
 		parseOpenAIFullAsStream(ctx, resp.Body, events)
 	}()
 	return events, nil
+}
+
+// injectExplicitCache 尝试将 system 消息的静态部分提交到显式缓存，并按 provider 修改请求。
+// 若 LLM_CONTEXT_CACHE_ENABLED 未启用、provider 不支持、或分割符不足，则静默跳过。
+// 缓存创建失败时记录 warn 日志并降级（继续使用完整 system 内容，不中断请求）。
+//
+// system 消息由三段组成（以 CacheBreakMarker 分隔）：
+//
+//	parts[0]: Security + Role + Tools（静态）
+//	parts[1]: Skill summaries（按用户稳定）
+//	parts[2]: Dynamic（当前用户/时间/KV/Memory，每次变化）
+//
+// 静态内容 = parts[0] + "\n\n" + parts[1]，以此为缓存 key 和 cache body；
+// 动态内容 = parts[2]，替换 system 消息的实际内容发送给模型。
+func (c *openAIClient) injectExplicitCache(ctx context.Context, req *openAIRequest, originalMessages []ChatMessage) {
+	if !config.Cfg.LLMContextCacheEnabled {
+		return
+	}
+	provider := detectExplicitCacheProvider(c.model)
+	if provider == "" {
+		return
+	}
+
+	// 在原始消息中找到 system（含 CacheBreakMarker），toOpenAIMessages 已将其剥离
+	var sysContent string
+	for _, m := range originalMessages {
+		if m.Role == "system" {
+			sysContent = m.Content
+			break
+		}
+	}
+	if sysContent == "" {
+		return
+	}
+
+	parts := strings.SplitN(sysContent, CacheBreakMarker, 3)
+	if len(parts) < 3 {
+		// system prompt 结构不足三段，无法区分静态与动态内容，跳过
+		return
+	}
+	static := parts[0] + "\n\n" + parts[1]
+	dynamic := parts[2]
+
+	cacheID, err := GlobalCacheManager.GetOrCreate(ctx, c.baseURL, c.apiKey, c.model, static)
+	if err != nil {
+		logger.Warn("llm", "", "", fmt.Sprintf("explicit cache create failed (model=%s): %v", c.model, err), 0)
+		return
+	}
+
+	switch provider {
+	case "kimi":
+		// Kimi 使用 {role:"cache"} 消息引用缓存，移除 system 消息
+		msgs := make([]openAIMessage, 0, len(req.Messages))
+		msgs = append(msgs, openAIMessage{Role: "cache", Content: cacheID})
+		for _, m := range req.Messages {
+			if m.Role != "system" {
+				msgs = append(msgs, m)
+			}
+		}
+		req.Messages = msgs
+	case "glm":
+		for i := range req.Messages {
+			if req.Messages[i].Role == "system" {
+				req.Messages[i].Content = dynamic
+				break
+			}
+		}
+		req.Context = &glmContextRef{Type: "cache", ID: cacheID}
+	case "doubao":
+		for i := range req.Messages {
+			if req.Messages[i].Role == "system" {
+				req.Messages[i].Content = dynamic
+				break
+			}
+		}
+		req.ContextCacheID = cacheID
+	case "qwen":
+		for i := range req.Messages {
+			if req.Messages[i].Role == "system" {
+				req.Messages[i].Content = dynamic
+				break
+			}
+		}
+		req.CacheID = cacheID
+	}
+	logger.Debug("llm-cache", "", "",
+		fmt.Sprintf("cache injected provider=%s model=%s id=%s", provider, c.model, cacheID), 0)
 }
 
 // parseOpenAIFullAsStream 将非流式 JSON 响应（代理降级时出现）解析后模拟成流事件。
@@ -344,10 +453,15 @@ func parseOpenAIFullAsStream(ctx context.Context, r io.Reader, events chan<- Str
 	}
 	ev := StreamEvent{Done: true}
 	if full.Usage != nil {
+		cacheRead := 0
+		if full.Usage.PromptTokensDetails != nil {
+			cacheRead = full.Usage.PromptTokensDetails.CachedTokens
+		}
 		ev.Usage = &Usage{
-			PromptTokens:     full.Usage.PromptTokens,
+			PromptTokens:    full.Usage.PromptTokens,
 			CompletionTokens: full.Usage.CompletionTokens,
-			TotalTokens:      full.Usage.TotalTokens,
+			TotalTokens:     full.Usage.TotalTokens,
+			CacheReadTokens: cacheRead,
 		}
 	}
 	send(ev)
@@ -385,10 +499,15 @@ func parseOpenAIStream(ctx context.Context, r io.Reader, events chan<- StreamEve
 		if data == "[DONE]" {
 			ev := StreamEvent{Done: true}
 			if lastUsage != nil {
+				cacheRead := 0
+				if lastUsage.PromptTokensDetails != nil {
+					cacheRead = lastUsage.PromptTokensDetails.CachedTokens
+				}
 				ev.Usage = &Usage{
-					PromptTokens:     lastUsage.PromptTokens,
+					PromptTokens:    lastUsage.PromptTokens,
 					CompletionTokens: lastUsage.CompletionTokens,
-					TotalTokens:      lastUsage.TotalTokens,
+					TotalTokens:     lastUsage.TotalTokens,
+					CacheReadTokens: cacheRead,
 				}
 			}
 			send(ev)

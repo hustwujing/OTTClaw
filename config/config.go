@@ -65,9 +65,16 @@ type AppConfig struct {
 	LogDataMaxLen int    // LOG_DATA_MAX_LEN：DebugData 截断阈值（字符数），超出则打印首尾各半；0 不截断，默认 600
 
 	// LLM Provider
-	LLMProvider  string // LLM_PROVIDER: "openai"（默认）| "anthropic"
-	LLMMaxTokens int    // LLM_MAX_TOKENS: Anthropic 必填，默认 8096
-	LLMRateLimit int    // LLM_RPM: 每分钟最大请求数，0 表示不限制
+	LLMProvider            string // LLM_PROVIDER: "openai"（默认）| "anthropic"
+	LLMMaxTokens           int    // LLM_MAX_TOKENS: Anthropic 必填，默认 8096
+	LLMRateLimit           int    // LLM_RPM: 每分钟最大请求数，0 表示不限制
+	LLMContextCacheEnabled bool   // LLM_CONTEXT_CACHE_ENABLED：是否启用显式 context cache（Kimi/GLM/Doubao/Qwen），默认 false
+	// 显式 cache 本地 TTL（秒）——略短于供应商侧实际有效期，防止持有 stale ID
+	// 供应商侧参考：Kimi 3600s、GLM ~1800s、Doubao ~3600s、Qwen ~3600s
+	LLMCacheTTLKimi   int // LLM_CACHE_TTL_KIMI，默认 3500
+	LLMCacheTTLGLM    int // LLM_CACHE_TTL_GLM，默认 1700
+	LLMCacheTTLDoubao int // LLM_CACHE_TTL_DOUBAO，默认 3500
+	LLMCacheTTLQwen   int // LLM_CACHE_TTL_QWEN，默认 3500
 
 	// LLM 多节点（负载均衡）
 	// 第一个节点始终为主节点（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL）。
@@ -87,6 +94,16 @@ type AppConfig struct {
 	FeishuAPIBase           string // FEISHU_API_BASE：飞书 Open API 基础地址，私有部署或代理时修改，默认 https://open.feishu.cn
 	FeishuSpinnerIntervalMs int    // FEISHU_SPINNER_INTERVAL_MS：飞书侧 spinner 动画刷新间隔毫秒数，默认 800
 	FeishuPendingTimeoutMin int    // FEISHU_PENDING_TIMEOUT_MIN：等待用户操作（上传文件等）的超时分钟数，默认 30
+
+	// 企业微信 AI 机器人（双向长连接接入）
+	// 每个用户的 Bot ID / Secret 存数据库，不在此处
+	WeComEncryptKey      string // WECOM_ENCRYPT_KEY：AES-GCM 加密用户 Bot Secret 的服务端密钥（必须设置，否则 set_bot_config 失败）
+
+	// 微信个人号（ilink bot 长轮询接入）
+	WeixinEncryptKey string // WEIXIN_ENCRYPT_KEY：AES-GCM 加密用户微信 token 的服务端密钥
+	WeComBotWSURL        string // WECOM_BOT_WS_URL：企微 AI 机器人 WebSocket 地址，默认 wss://openws.work.weixin.qq.com
+	WeComBotHeartbeatSec int    // WECOM_BOT_HEARTBEAT_SEC：心跳间隔秒数，默认 30
+	WeComBotMaxReconnect int    // WECOM_BOT_MAX_RECONNECT：断连后最大重连次数，默认 100
 
 	// nano-banana 图像生成
 	NanoBananaAPIKey  string // NANO_BANANA_API_KEY：Bilibili LLM API 密钥（必填）
@@ -225,12 +242,22 @@ func loadConfig() *AppConfig {
 		LLMProvider:             getEnv("LLM_PROVIDER", "openai"),
 		LLMMaxTokens:            getEnvInt("LLM_MAX_TOKENS", 8096),
 		LLMRateLimit:            getEnvInt("LLM_RPM", 0),
+		LLMContextCacheEnabled:  getEnvBool("LLM_CONTEXT_CACHE_ENABLED", false),
+		LLMCacheTTLKimi:         getEnvInt("LLM_CACHE_TTL_KIMI", 3500),
+		LLMCacheTTLGLM:          getEnvInt("LLM_CACHE_TTL_GLM", 1700),
+		LLMCacheTTLDoubao:       getEnvInt("LLM_CACHE_TTL_DOUBAO", 3500),
+		LLMCacheTTLQwen:         getEnvInt("LLM_CACHE_TTL_QWEN", 3500),
 		MaxContextTokens:        getEnvInt("MAX_CONTEXT_TOKENS", 6000),
 		CompressKeepRecent:      getEnvInt("COMPRESS_KEEP_RECENT", 10),
 		FeishuEncryptKey:        getEnv("FEISHU_ENCRYPT_KEY", ""),
 		FeishuAPIBase:           getEnv("FEISHU_API_BASE", "https://open.feishu.cn"),
 		FeishuSpinnerIntervalMs: getEnvInt("FEISHU_SPINNER_INTERVAL_MS", 800),
 		FeishuPendingTimeoutMin: getEnvInt("FEISHU_PENDING_TIMEOUT_MIN", 30),
+		WeComEncryptKey:         getEnv("WECOM_ENCRYPT_KEY", ""),
+		WeixinEncryptKey:        getEnv("WEIXIN_ENCRYPT_KEY", ""),
+		WeComBotWSURL:           getEnv("WECOM_BOT_WS_URL", "wss://openws.work.weixin.qq.com"),
+		WeComBotHeartbeatSec:    getEnvInt("WECOM_BOT_HEARTBEAT_SEC", 30),
+		WeComBotMaxReconnect:    getEnvInt("WECOM_BOT_MAX_RECONNECT", 100),
 		NanoBananaAPIKey:        getEnv("NANO_BANANA_API_KEY", ""),
 		NanoBananaBaseURL:       getEnv("NANO_BANANA_BASE_URL", "http://llmapi.bilibili.co/v1"),
 		NanoBananaModel:         getEnv("NANO_BANANA_MODEL", "ppio/nano-banana-pro"),

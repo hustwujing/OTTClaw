@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -243,6 +244,7 @@ func (s *store) GetHead(userID string) []Head {
 	for _, sk := range merged {
 		heads = append(heads, sk.Head)
 	}
+	sort.Slice(heads, func(i, j int) bool { return heads[i].SkillID < heads[j].SkillID })
 	return heads
 }
 
@@ -259,6 +261,7 @@ func (s *store) GetAllHeads() []Head {
 			heads = append(heads, sk.Head)
 		}
 	}
+	sort.Slice(heads, func(i, j int) bool { return heads[i].SkillID < heads[j].SkillID })
 	return heads
 }
 

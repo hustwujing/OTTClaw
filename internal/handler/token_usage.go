@@ -25,7 +25,9 @@ func GetTokenUsage(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"prompt_tokens":     summary.PromptTokens,
-		"completion_tokens": summary.CompletionTokens,
+		"prompt_tokens":         summary.PromptTokens,
+		"completion_tokens":     summary.CompletionTokens,
+		"cache_read_tokens":     summary.CacheReadTokens,
+		"cache_creation_tokens": summary.CacheCreationTokens,
 	})
 }

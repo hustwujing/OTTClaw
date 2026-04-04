@@ -29,13 +29,26 @@ import (
 
 // ----- Anthropic 请求结构 -----
 
+// anthropicSystemBlock Anthropic system 内容块，支持 prompt caching。
+// 当 CacheControl 不为 nil 时，Anthropic 会在此块末尾设置缓存断点（ephemeral TTL ≤1h）。
+type anthropicSystemBlock struct {
+	Type         string              `json:"type"`
+	Text         string              `json:"text"`
+	CacheControl *anthropicCacheCtrl `json:"cache_control,omitempty"`
+}
+
+// anthropicCacheCtrl Anthropic prompt 缓存控制标记
+type anthropicCacheCtrl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
-	Stream    bool               `json:"stream"`
+	Model     string                 `json:"model"`
+	MaxTokens int                    `json:"max_tokens"`
+	System    []anthropicSystemBlock `json:"system,omitempty"`
+	Messages  []anthropicMessage     `json:"messages"`
+	Tools     []anthropicTool        `json:"tools,omitempty"`
+	Stream    bool                   `json:"stream"`
 }
 
 type anthropicMessage struct {
@@ -149,6 +162,7 @@ func (c *anthropicClient) ChatStream(ctx context.Context, messages []ChatMessage
 	httpReq.Header.Set("X-Accel-Buffering", "no")
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -174,7 +188,7 @@ func (c *anthropicClient) ChatStream(ctx context.Context, messages []ChatMessage
 
 // convertToAnthropicMessages 将 OpenAI 格式的 messages 转换为 Anthropic 格式。
 // system 消息被提取为独立返回值；连续的 role=tool 消息被合并为单条 user 消息。
-func convertToAnthropicMessages(messages []ChatMessage) (system string, result []anthropicMessage, err error) {
+func convertToAnthropicMessages(messages []ChatMessage) (system []anthropicSystemBlock, result []anthropicMessage, err error) {
 	var systemParts []string
 	i := 0
 	for i < len(messages) {
@@ -298,7 +312,22 @@ func convertToAnthropicMessages(messages []ChatMessage) (system string, result [
 		}
 	}
 
-	system = strings.Join(systemParts, "\n\n")
+	// 按 CacheBreakMarker 分割，生成带 cache_control 的 system block 列表。
+	// 每个 CacheBreakMarker 之前的 block 标记 ephemeral 缓存断点；最后一个 block 不缓存
+	// （包含随每轮变动的动态内容：skill content、当前时间、KV、MCP、memory 等）。
+	// 若 prompt 中无标记（非 Anthropic provider 或 OpenAI 兼容模式），rawSystem 作为单块返回，行为与原来一致。
+	rawSystem := strings.Join(systemParts, "\n\n")
+	rawParts := strings.Split(rawSystem, CacheBreakMarker)
+	for i, part := range rawParts {
+		if part == "" {
+			continue
+		}
+		block := anthropicSystemBlock{Type: "text", Text: part}
+		if i < len(rawParts)-1 {
+			block.CacheControl = &anthropicCacheCtrl{Type: "ephemeral"}
+		}
+		system = append(system, block)
+	}
 
 	// 防御性清理：移除 result 开头的孤立 tool_result 消息。
 	// 正常情况下 compressHistory 的 user 边界切割已保证不会出现此情况，
@@ -361,10 +390,12 @@ func parseAnthropicStream(ctx context.Context, r io.Reader, events chan<- Stream
 	toolBlockCount := 0
 
 	var (
-		currentEvent  string
-		dataLines     []string
-		inputTokens   int
-		outputTokens  int
+		currentEvent        string
+		dataLines           []string
+		inputTokens         int
+		outputTokens        int
+		cacheReadTokens     int
+		cacheCreationTokens int
 	)
 
 	send := func(ev StreamEvent) {
@@ -381,12 +412,16 @@ func parseAnthropicStream(ctx context.Context, r io.Reader, events chan<- Stream
 			var d struct {
 				Message struct {
 					Usage struct {
-						InputTokens int `json:"input_tokens"`
+						InputTokens         int `json:"input_tokens"`
+						CacheReadTokens     int `json:"cache_read_input_tokens"`
+						CacheCreationTokens int `json:"cache_creation_input_tokens"`
 					} `json:"usage"`
 				} `json:"message"`
 			}
 			if err := json.Unmarshal([]byte(dataStr), &d); err == nil {
 				inputTokens = d.Message.Usage.InputTokens
+				cacheReadTokens = d.Message.Usage.CacheReadTokens
+				cacheCreationTokens = d.Message.Usage.CacheCreationTokens
 			}
 
 		case "content_block_start":
@@ -473,11 +508,12 @@ func parseAnthropicStream(ctx context.Context, r io.Reader, events chan<- Stream
 		case "message_stop":
 			ev := StreamEvent{Done: true}
 			if inputTokens > 0 || outputTokens > 0 {
-				total := inputTokens + outputTokens
 				ev.Usage = &Usage{
-					PromptTokens:     inputTokens,
-					CompletionTokens: outputTokens,
-					TotalTokens:      total,
+					PromptTokens:        inputTokens,
+					CompletionTokens:    outputTokens,
+					TotalTokens:         inputTokens + outputTokens,
+					CacheReadTokens:     cacheReadTokens,
+					CacheCreationTokens: cacheCreationTokens,
 				}
 			}
 			send(ev)

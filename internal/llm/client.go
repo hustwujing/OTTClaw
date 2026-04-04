@@ -63,11 +63,18 @@ type ToolFunction struct {
 	Parameters  map[string]any `json:"parameters"`
 }
 
+// CacheBreakMarker 是注入 system prompt 中的零宽分隔符，用于标记 Anthropic prompt-cache 断点。
+// Anthropic 客户端按此标记将 system 字段拆分为多个 content block，
+// 每个断点之前的 block 加 cache_control: ephemeral，从而启用 prefix caching。
+const CacheBreakMarker = "\x00\x00CB\x00\x00"
+
 // Usage LLM 调用的 token 消耗统计
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	CacheReadTokens     int // Anthropic: cache_read_input_tokens；OpenAI: prompt_tokens_details.cached_tokens
+	CacheCreationTokens int // Anthropic: cache_creation_input_tokens；OpenAI: 无对应字段
 }
 
 // StreamEvent Agent 消费的流事件

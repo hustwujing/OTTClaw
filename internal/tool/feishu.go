@@ -227,7 +227,9 @@ func handleSetFeishuConfig(ctx context.Context, argsJSON string) (string, error)
 	if appID != "" {
 		newCfg, _ := storage.GetFeishuConfig(userID)
 		if newCfg != nil && newCfg.AppSecretEnc != "" {
-			feishu.Registry.StartForUser(context.Background(), userID, newCfg)
+			if reg := feishu.GetRegistry(); reg != nil {
+				reg.StartForUser(context.Background(), userID)
+			}
 		}
 	}
 

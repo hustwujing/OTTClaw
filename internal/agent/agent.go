@@ -542,19 +542,23 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			if iter == 1 {
 				inputSuffix = "  | " + logUserInput(userInput)
 			}
+			cacheSuffix := ""
+			if iterUsage.CacheReadTokens > 0 || iterUsage.CacheCreationTokens > 0 {
+				cacheSuffix = fmt.Sprintf("  缓存命中=%d 缓存写入=%d", iterUsage.CacheReadTokens, iterUsage.CacheCreationTokens)
+			}
 			logger.Debug("llm", userID, sessionID,
 				fmt.Sprintf(
 					"llm用量 第%d轮 输入=%d 输出=%d 合计=%d"+
-						"  ~系统=%d(角色~%d 技能~%d KV~%d 其他~%d) ~工具=%d ~历史=%d ~用户=%d%s",
+						"  ~系统=%d(角色~%d 技能~%d KV~%d 其他~%d) ~工具=%d ~历史=%d ~用户=%d%s%s",
 					iter, iterUsage.PromptTokens, iterUsage.CompletionTokens, iterUsage.TotalTokens,
 					promptBD.total/4, roleT, skillT, kvT, otherSysT,
 					toolsChars/4, histChars/3, userChars/3,
-					inputSuffix,
+					inputSuffix, cacheSuffix,
 				),
 				time.Since(iterStart))
 			go func(u llm.Usage) {
 				if err := storage.AddTokenUsage(userID, sessionID, config.Cfg.LLMModel,
-					u.PromptTokens, u.CompletionTokens); err != nil {
+					u.PromptTokens, u.CompletionTokens, u.CacheReadTokens, u.CacheCreationTokens); err != nil {
 					logger.Warn("agent", userID, sessionID, "save token usage failed", 0)
 				}
 			}(*iterUsage)
@@ -1311,10 +1315,10 @@ Refer to the parameter descriptions in the tool definitions for usage. If unsure
 In conversation history, user messages prefixed with "[工具 X 结果]:" are historical tool results stored for context — do NOT output text in this format yourself; always invoke tools via the real tool-calling interface.
 For reading code or documentation files, always prefer code_search over fs or exec: use outline to get file structure first, then chunk_read to read specific sections. Never use exec to run cat/sed/grep/find on source files — use code_search actions instead. For simple git lookups (basic log/show/diff/blame/status), prefer code_search(action=git); use exec when git commands need shell features like date arithmetic, author filtering, pipes, custom formats, or multi-command chains.
 
-%s
+%s`+llm.CacheBreakMarker+`
 
 # Available Skills (Summaries Only — Use skill(action=load) to read full content)
-%s%s
+%s`+llm.CacheBreakMarker+`%s
 
 # Current User
 user_id: %s

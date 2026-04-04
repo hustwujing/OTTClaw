@@ -517,8 +517,9 @@ func SendFileTo(appID, receiveID, receiveIDType, fileKey string) error {
 
 // ── 文件下载 ───────────────────────────────────────────────────────────────────
 
-// DownloadResource 下载飞书消息中的图片/文件到本地，返回相对于 uploadDir 的路径
-func DownloadResource(appID, messageID, fileKey, resourceType, uploadDir string) (string, error) {
+// DownloadResource 下载飞书消息中的图片/文件到本地，返回相对于 uploadDir 的路径。
+// hintName 为原始文件名（来自消息元数据），非空时作为扩展名的最终兜底。
+func DownloadResource(appID, messageID, fileKey, resourceType, uploadDir, hintName string) (string, error) {
 	token, err := GetToken(appID)
 	if err != nil {
 		return "", err
@@ -540,15 +541,50 @@ func DownloadResource(appID, messageID, fileKey, resourceType, uploadDir string)
 	}
 
 	ext := ".bin"
-	switch resp.Header.Get("Content-Type") {
-	case "image/jpeg":
-		ext = ".jpg"
-	case "image/png":
-		ext = ".png"
-	case "image/gif":
-		ext = ".gif"
-	case "image/webp":
-		ext = ".webp"
+	// 优先从 Content-Disposition 中取原始文件名的扩展名（最可靠）
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if fn := params["filename"]; fn != "" {
+				if e := filepath.Ext(fn); e != "" {
+					ext = strings.ToLower(e)
+				}
+			}
+		}
+	}
+	// 再从 Content-Type 推断（兜底，用于图片及 Content-Disposition 缺失的场景）
+	if ext == ".bin" {
+		switch resp.Header.Get("Content-Type") {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/png":
+			ext = ".png"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		case "application/pdf":
+			ext = ".pdf"
+		case "application/msword":
+			ext = ".doc"
+		case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+			ext = ".docx"
+		case "application/vnd.ms-excel":
+			ext = ".xls"
+		case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+			ext = ".xlsx"
+		case "application/vnd.ms-powerpoint":
+			ext = ".ppt"
+		case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+			ext = ".pptx"
+		case "text/plain":
+			ext = ".txt"
+		}
+	}
+	// 最终兜底：从原始文件名（消息元数据）取扩展名
+	if ext == ".bin" {
+		if e := filepath.Ext(hintName); e != "" {
+			ext = strings.ToLower(e)
+		}
 	}
 
 	// 用 fileKey 后 8 位 + 时间戳命名，放到 uploadDir/feishu/ 子目录
