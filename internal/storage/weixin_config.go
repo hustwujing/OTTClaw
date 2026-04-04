@@ -79,6 +79,12 @@ func DeleteWeixinConfig(userID string) error {
 	return DB.Where("user_id = ?", userID).Delete(&WeixinConfig{}).Error
 }
 
+// ClearWeixinToken removes the stored token so the next Connect attempt triggers QR re-login.
+func ClearWeixinToken(userID string) error {
+	return DB.Model(&WeixinConfig{}).Where("user_id = ?", userID).
+		Update("token_enc", "").Error
+}
+
 func GetDecryptedWeixinToken(userID string) (string, error) {
 	cfg, err := GetWeixinConfig(userID)
 	if err != nil || cfg == nil || cfg.TokenEnc == "" {

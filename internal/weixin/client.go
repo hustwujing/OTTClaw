@@ -4,6 +4,7 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,9 @@ const (
 	QRLoginTimeout    = 480 * time.Second
 	QRMaxRefreshes    = 10
 )
+
+// ErrSessionExpired is returned by pollLoop when the server rejects the token (-14).
+var ErrSessionExpired = errors.New("session expired")
 
 type MessageHandler func(fromUserID, contextToken, text string)
 
@@ -219,7 +223,7 @@ func (c *Client) pollLoop(ctx context.Context) error {
 		if ret != 0 || errcode != 0 {
 			if errcode == SessionExpiredErr || ret == SessionExpiredErr {
 				logger.Warn("weixin", c.ownerUserID, "", "session expired (-14)", 0)
-				return fmt.Errorf("session expired")
+				return ErrSessionExpired
 			}
 			consecFail++
 			errmsg, _ := resp["errmsg"].(string)

@@ -3,6 +3,7 @@ package weixin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -60,5 +61,13 @@ func (a *WeixinAdapter) Connect(ctx context.Context, ownerUserID string, dispatc
 	client = NewClient(ownerUserID, onMessage)
 	setActiveClient(ownerUserID, client)
 	defer removeActiveClient(ownerUserID)
-	return client.Run(ctx, baseURL, token, DefaultCDNBaseURL)
+	err = client.Run(ctx, baseURL, token, DefaultCDNBaseURL)
+	if errors.Is(err, ErrSessionExpired) {
+		logger.Warn("weixin", ownerUserID, "",
+			"token rejected by server (session expired, possibly re-bound on another instance); clearing stored token to force QR re-login", 0)
+		if clearErr := storage.ClearWeixinToken(ownerUserID); clearErr != nil {
+			logger.Warn("weixin", ownerUserID, "", fmt.Sprintf("clear token: %v", clearErr), 0)
+		}
+	}
+	return err
 }
