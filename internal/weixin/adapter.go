@@ -31,6 +31,10 @@ func (a *WeixinAdapter) Connect(ctx context.Context, ownerUserID string, dispatc
 		logger.Warn("weixin", ownerUserID, "", fmt.Sprintf("decrypt token error: %v", err), 0)
 		token = ""
 	}
+	if token == "" {
+		logger.Warn("weixin", ownerUserID, "", "no token stored, skipping connect (re-bind via UI to reconnect)", 0)
+		return nil
+	}
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
@@ -64,7 +68,7 @@ func (a *WeixinAdapter) Connect(ctx context.Context, ownerUserID string, dispatc
 	err = client.Run(ctx, baseURL, token, DefaultCDNBaseURL)
 	if errors.Is(err, ErrSessionExpired) {
 		logger.Warn("weixin", ownerUserID, "",
-			"token rejected by server (session expired, possibly re-bound on another instance); clearing stored token to force QR re-login", 0)
+			"session expired (-14): token rejected by server (possibly re-bound on another instance); stored token cleared, re-bind via UI to reconnect", 0)
 		if clearErr := storage.ClearWeixinToken(ownerUserID); clearErr != nil {
 			logger.Warn("weixin", ownerUserID, "", fmt.Sprintf("clear token: %v", clearErr), 0)
 		}
