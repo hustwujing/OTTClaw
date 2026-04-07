@@ -29,7 +29,7 @@ import (
 )
 
 // handleProcess 是 process 工具的入口，根据 action 路由到对应子处理函数
-func handleProcess(_ context.Context, argsJSON string) (string, error) {
+func handleProcess(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
 		Action    string `json:"action"`
 		SessionID string `json:"session_id"`
@@ -53,7 +53,7 @@ func handleProcess(_ context.Context, argsJSON string) (string, error) {
 	case "list":
 		return processList()
 	case "poll":
-		return processPoll(args.SessionID, args.Timeout)
+		return processPoll(args.SessionID, args.Timeout, userIDFromCtx(ctx))
 	case "log":
 		return processLog(args.SessionID, args.Offset, args.Limit)
 	case "write":
@@ -129,7 +129,7 @@ func processList() (string, error) {
 // processPoll 等待进程完成或 timeoutMs 到期，批量返回期间所有增量输出。
 // 修复：不再在有新输出时立即返回（避免 npm install 等频繁输出的命令快速消耗 LLM 迭代次数）。
 // 每次 poll 最多阻塞 timeoutMs，期间所有新输出在超时/完成时一次性返回给 LLM。
-func processPoll(sessionID string, timeoutMs int) (string, error) {
+func processPoll(sessionID string, timeoutMs int, userID string) (string, error) {
 	sess, err := lookupSession(sessionID)
 	if err != nil {
 		return "", err
@@ -138,7 +138,7 @@ func processPoll(sessionID string, timeoutMs int) (string, error) {
 	// 已完成：直接返回
 	select {
 	case <-sess.doneCh:
-		return execDoneResult(sess), nil
+		return execDoneResult(sess, userID), nil
 	default:
 	}
 
@@ -155,7 +155,7 @@ func processPoll(sessionID string, timeoutMs int) (string, error) {
 
 	select {
 	case <-sess.doneCh:
-		return execDoneResult(sess), nil
+		return execDoneResult(sess, userID), nil
 
 	case <-timer.C:
 		return execMarshal(map[string]any{

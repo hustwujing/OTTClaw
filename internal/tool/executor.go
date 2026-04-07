@@ -18,6 +18,7 @@
 //   - feishu            : 飞书操作统一入口（action=send/webhook/get_config/set_config，合并自 4 个工具）
 //   - wecom             : 企业微信统一入口（action=send/get_config/set_config，合并自 3 个工具）
 //   - mcp               : MCP 外接能力统一入口（action=list/detail/call，通过 internal/mcp/registry.go 懒加载）
+//   - desktop           : 桌面控制统一入口（action=screenshot/get_screen_size/mouse_move/left_click/right_click/double_click/type/key/scroll/drag，需 DESKTOP_ENABLED=true）
 //
 // 依赖注入策略：
 //   - ProgressSender    通过 context.Value 注入，供 send_progress 使用
@@ -284,6 +285,9 @@ func New() *Executor {
 	e.register("cancel_subtask", handleCancelSubtask)
 	e.register("report_task_progress", handleReportTaskProgress)
 	e.register("notify_parent", handleNotifyParent)
+	if config.Cfg.DesktopEnabled {
+		e.register("desktop", handleDesktop)
+	}
 	return e
 }
 
@@ -724,6 +728,35 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 	}
 	if config.Cfg.HonchoEnabled {
 		all = append(all, HonchoTools()...)
+	}
+	if config.Cfg.DesktopEnabled {
+		all = append(all, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "desktop",
+				Description: "Control the desktop: take screenshots, move mouse, click, type text, press keys, scroll, drag. action=screenshot returns current screen as an image the LLM can see. Recommended workflow: screenshot → analyze → act → screenshot to verify.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"action": map[string]any{
+							"type": "string",
+							"enum": []string{"screenshot", "get_screen_size", "mouse_move", "left_click", "right_click", "double_click", "type", "key", "scroll", "drag"},
+						},
+						"x":         map[string]any{"type": "integer", "description": "X coordinate (pixels)"},
+						"y":         map[string]any{"type": "integer", "description": "Y coordinate (pixels)"},
+						"text":      map[string]any{"type": "string", "description": "Text to type (action=type)"},
+						"key":       map[string]any{"type": "string", "description": "Key combo, e.g. ctrl+c, Return, escape, ctrl+alt+t (action=key)"},
+						"direction": map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "Scroll direction (action=scroll)"},
+						"amount":    map[string]any{"type": "integer", "description": "Scroll amount in lines, default 3 (action=scroll)"},
+						"start_x":   map[string]any{"type": "integer", "description": "Drag start X (action=drag)"},
+						"start_y":   map[string]any{"type": "integer", "description": "Drag start Y (action=drag)"},
+						"end_x":     map[string]any{"type": "integer", "description": "Drag end X (action=drag)"},
+						"end_y":     map[string]any{"type": "integer", "description": "Drag end Y (action=drag)"},
+					},
+					"required": []string{"action"},
+				},
+			},
+		})
 	}
 	// 子 agent 工具
 	all = append(all,

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"crypto/md5"
@@ -373,6 +374,15 @@ func resolveMediaPath(pathOrURL string) (string, error) {
 	}
 	if p := pathOrURL; len(p) > 7 && p[:7] == "file://" {
 		pathOrURL = p[7:]
+	}
+	// Web 路径（/output/xxx.png）→ 本地绝对路径（{cwd}/output/xxx.png）。
+	// 飞书侧采用同样的转换逻辑（filepath.Abs + TrimPrefix "/"）。
+	if strings.HasPrefix(pathOrURL, "/") {
+		if candidate, err := filepath.Abs(strings.TrimPrefix(pathOrURL, "/")); err == nil {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return candidate, nil
+			}
+		}
 	}
 	if len(pathOrURL) > 7 && (pathOrURL[:7] == "http://" || pathOrURL[:8] == "https://") {
 		resp, err := (&http.Client{Timeout: 60 * time.Second}).Get(pathOrURL)

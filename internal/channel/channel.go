@@ -44,3 +44,21 @@ type Adapter interface {
 	// 收到消息时通过 dispatch 分发，由框架负责重连
 	Connect(ctx context.Context, ownerUserID string, dispatch DispatchFunc) error
 }
+
+// ── ExecAutoApprove 上下文标记 ───────────────────────────────────────────────
+//
+// 微信、飞书等无法弹出交互式确认框的渠道，在调用 dispatch 前注入此标记。
+// exec 工具读取该标记后直接执行命令，无需等待用户点击确认。
+
+type execAutoApproveKey struct{}
+
+// WithExecAutoApprove 向 ctx 注入"exec 自动审批"标记。
+func WithExecAutoApprove(ctx context.Context) context.Context {
+	return context.WithValue(ctx, execAutoApproveKey{}, true)
+}
+
+// ExecAutoApproveFromCtx 读取"exec 自动审批"标记。
+func ExecAutoApproveFromCtx(ctx context.Context) bool {
+	v, _ := ctx.Value(execAutoApproveKey{}).(bool)
+	return v
+}

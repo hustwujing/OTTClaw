@@ -188,6 +188,16 @@ func handleSpecialReply(botCtx context.Context, ownerUserID, sessionID, peer, re
 		if text == "" {
 			text = content
 		}
+		// 如果用户回复的是 exec 确认（"确认执行 ep_xxx"），把调度文本改写为强制指令，
+		// 防止 LLM 在长历史下幻觉「任务已完成」而不调用 exec_run。
+		if strings.HasPrefix(text, "确认执行 ep_") {
+			pendingID := strings.TrimPrefix(text, "确认执行 ")
+			text = fmt.Sprintf(
+				"[指令] 用户刚刚确认执行命令，pending_id=%s。"+
+					"你必须立即调用 exec_run(pending_id=%q)，不得跳过，不得以历史中已有结果为由省略此步骤。",
+				pendingID, pendingID,
+			)
+		}
 		doDispatch(botCtx, peer, receiveIDType, text)
 
 	case PendingUpload:
@@ -346,7 +356,6 @@ func makeCardActionHandler(
 
 // ── feishuWriter：实现 channel.StreamWriter ──────────────────────────────────
 
-// spinnerFrames ⏳/⌛ 交替形成"沙漏翻转"动画
 var spinnerFrames = []string{
 	"🀙 消息收到，让我先看看，别慌，小场面…",
 	"🀚 消息收到，让我先看看，别慌，小场面…",
@@ -406,6 +415,11 @@ func newFeishuWriter(peer, receiveIDType, ownerUserID, sessionID, appID string) 
 			sc()
 		}
 
+		// 剥离 kimi 等 reasoning 模型在 text 字段内嵌的思考链：
+		// 此类模型不输出 <think>，仅以 </think> 标记思考结束；标记之前的内容均为思考链，需丢弃。
+		if idx := strings.Index(text, "</think>"); idx >= 0 {
+			text = text[idx+len("</think>"):]
+		}
 		// 移除飞书不支持的 ![alt](url) 图片语法
 		text = strings.TrimSpace(mdImageRe.ReplaceAllString(text, ""))
 		if text == "" {
@@ -463,7 +477,12 @@ func (w *feishuWriter) runSpinner(ctx context.Context) {
 		}
 
 		var display string
-		if text := strings.TrimSpace(mdImageRe.ReplaceAllString(w.FlushText(), "")); text != "" {
+		rawText := w.FlushText()
+		// 若文本中含 </think>，说明是 kimi 等 reasoning 模型嵌入了思考链，丢弃 </think> 之前的内容。
+		if idx := strings.Index(rawText, "</think>"); idx >= 0 {
+			rawText = rawText[idx+len("</think>"):]
+		}
+		if text := strings.TrimSpace(mdImageRe.ReplaceAllString(rawText, "")); text != "" {
 			display = text + "\n▍"
 		} else {
 			display = spinnerFrames[frame%len(spinnerFrames)]
@@ -578,6 +597,7 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 			Message      string `json:"message"`
 			ConfirmLabel string `json:"confirm_label"`
 			CancelLabel  string `json:"cancel_label"`
+			PendingID    string `json:"pending_id"`
 		}
 		b, _ := json.Marshal(data)
 		var payload confirmPayload
@@ -588,12 +608,23 @@ func (w *feishuWriter) WriteInteractive(kind string, data any) error {
 		if confirmLabel == "" {
 			confirmLabel = "确认"
 		}
+		// 将 pending_id 嵌入按钮的 choice 值，确保点击按钮时回传的文本包含 pending_id，
+		// LLM 直接读取即可，无需从历史消息猜测。
+		confirmChoice := confirmLabel
+		if payload.PendingID != "" {
+			confirmChoice = confirmLabel + " " + payload.PendingID
+		}
 		cancelLabel := payload.CancelLabel
 		if cancelLabel == "" {
 			cancelLabel = "取消"
 		}
-		msg := fmt.Sprintf("%s\n\n请回复「%s」或「%s」", payload.Message, confirmLabel, cancelLabel)
+		// 优先发送格式化卡片（显示命令内容 + 文字指引），失败时降级为纯文本。
+		// SDK WebSocket 模式不支持卡片按钮回调，确认逻辑统一走 MarkPending 文字回复。
 		MarkPending(w.SessionID, PendingChoice)
+		if err := SendConfirmCard(w.appID, w.peer, w.receiveIDType, payload.Message, confirmChoice, cancelLabel); err == nil {
+			return nil
+		}
+		msg := fmt.Sprintf("%s\n\n请回复「%s」或「%s」", payload.Message, confirmChoice, cancelLabel)
 		return SendTextTo(w.appID, w.peer, w.receiveIDType, msg)
 
 	case "file_upload":

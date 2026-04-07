@@ -2,7 +2,15 @@
 
 ## exec
 
-Execute a shell command via `bash -c`. Short commands return output inline; long-running ones background and return `session_id` — poll with `process(action=poll)`.
+Execute a shell command via `bash -c`.
+
+**主 agent 会话（必须两步）：**
+1. `exec(command)` → 推送确认框给用户，返回 `{status:"pending_approval", pending_id:"ep_xxx"}` — **命令尚未执行！Stop and wait.**
+2. 用户点击"确认执行"后，**必须调用 `exec_run(pending_id:"ep_xxx")`** → 返回 `{status:"done"/"running", exit_code, output}` — 命令至此才真正执行。
+
+**⚠️ 禁止：** 看到 `pending_approval` 后假设命令已完成、跳过 `exec_run` 直接调 `output_file`。下一轮务必先调 `exec_run(pending_id)`，再处理生成的文件。
+
+**子 agent（spawn_subagent）中：** exec 跳过审批步骤，直接执行。
 
 | Param | Default | Notes |
 |-------|---------|-------|
@@ -13,73 +21,93 @@ Execute a shell command via `bash -c`. Short commands return output inline; long
 | `yield_ms` | 10000 | Wait window before backgrounding |
 | `background` | false | `true` = skip wait, background immediately |
 
-Returns inline: `{exit_code, stdout, stderr}` | Backgrounded: `{session_id, output_so_far}`
-
-```json
-{"command": "ls -la /tmp"}
-{"command": "go build ./...", "workdir": "/app"}
-{"command": "npm run dev", "workdir": "/app", "background": true}
-{"command": "python3 train.py", "env": {"CUDA_VISIBLE_DEVICES": "0"}, "timeout_sec": 7200}
-```
+exec_run returns inline: `{status:"done", exit_code, output}` | Still running: `{status:"running", session_id}` — poll with `process(action=poll)`
 
 **⚠️ File auto-delivery after exec** — no separate `output_file` call needed if:
 
 | Method | How | Scope |
 |--------|-----|-------|
-| A (recommended) | `print(abs_path)` in script | Any file |
-| B | Save to `output/<filename>` | Images only |
-| C (fallback) | `output_file(action=download, file_path=...)` | Any file |
+| **A (recommended)** | Save to `$AGENT_OUTPUT_DIR` | Any file, any count |
+| B | Append path to `$AGENT_REGISTER_FILE` | Files saved outside AGENT_OUTPUT_DIR |
+| C | Save directly to `output/<filename>` | Images only |
+| D (fallback) | `output_file(action=download, file_path=...)` | Any file |
 
-After A/B: exec result contains `imageSentNote` (embed markdown verbatim, don't alter URL) or `filesSentNote` (include `download_url` in reply).
+**Method A — AGENT_OUTPUT_DIR（首选）**
 
-**⚠️ matplotlib CJK fonts — NEVER use `rcParams['font.sans-serif']`** (font cache unreliable). Use the snippet below **verbatim** — copy it to the top of every matplotlib script that contains Chinese text:
+exec 启动时自动注入 `AGENT_OUTPUT_DIR`（session 级隔离目录，每次 exec 唯一）。**所有生成的文件都保存到这个目录**，exec 结束后系统自动扫描并投递，无需任何注册代码。
+
+```python
+# Python — 保存单个文件
+import os
+out_dir = os.environ['AGENT_OUTPUT_DIR']
+output_path = os.path.join(out_dir, 'chart.png')
+plt.savefig(output_path)
+```
+
+```python
+# Python — 保存多个文件
+import os
+out_dir = os.environ['AGENT_OUTPUT_DIR']
+plt.savefig(os.path.join(out_dir, 'chart.png'))
+df.to_csv(os.path.join(out_dir, 'data.csv'), index=False)
+with open(os.path.join(out_dir, 'report.txt'), 'w') as f:
+    f.write(report_content)
+```
+
+```bash
+# Bash
+out_dir="$AGENT_OUTPUT_DIR"
+cp result.pdf "$out_dir/result.pdf"
+```
+
+```javascript
+// Node.js
+const outDir = process.env.AGENT_OUTPUT_DIR;
+fs.writeFileSync(path.join(outDir, 'output.json'), JSON.stringify(data));
+```
+
+**Method B — AGENT_REGISTER_FILE（兜底：文件必须保存到其他位置时）**
+
+每生成一个文件，追加其绝对路径到 `$AGENT_REGISTER_FILE`（一行一个）：
 
 ```python
 import os
-import matplotlib.pyplot as plt
-from matplotlib import font_manager as _fm
-
-def _get_cn_font():
-    for p in ['/System/Library/Fonts/Hiragino Sans GB.ttc',
-              '/System/Library/Fonts/STHeiti Medium.ttc',
-              '/System/Library/Fonts/STHeiti Light.ttc',
-              '/System/Library/Fonts/PingFang.ttc',
-              '/Library/Fonts/Arial Unicode MS.ttf',
-              'C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf', 'C:/Windows/Fonts/simsun.ttc',
-              '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
-              '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-              '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc']:
-        if os.path.exists(p): return _fm.FontProperties(fname=p)
-    for f in _fm.fontManager.ttflist:
-        if any(k in f.name for k in ('CJK', 'Heiti', 'YaHei', 'WenQuanYi', 'Hiragino', 'PingFang', 'STHeiti')):
-            return _fm.FontProperties(fname=f.fname)
-    return None  # fallback: use English labels
-
-def _apply_cn_font(ax, cn_font):
-    """Apply cn_font to ALL text elements of an axes — call once after setting all labels."""
-    if cn_font is None:
-        return
-    for item in ([ax.title, ax.xaxis.label, ax.yaxis.label] +
-                 ax.get_xticklabels() + ax.get_yticklabels()):
-        item.set_fontproperties(cn_font)
-    legend = ax.get_legend()
-    if legend:
-        for t in legend.get_texts():
-            t.set_fontproperties(cn_font)
-
-cn_font = _get_cn_font()
-plt.rcParams['axes.unicode_minus'] = False
+reg = os.environ.get('AGENT_REGISTER_FILE', '')
+if reg:
+    open(reg, 'a').write('/path/to/file.png\n')
 ```
 
-**After setting all titles/labels/ticks on each axes, call:**
-```python
-_apply_cn_font(ax, cn_font)
-```
+After A/B/C: exec result contains `imageSentNote` (embed markdown verbatim, don't alter URL) or `filesSentNote` (include `download_url` in reply).
 
-For inline text (annotate, text, bar labels) also pass `fontproperties=cn_font`:
+**⚠️ matplotlib 中文字体** — 每个含中文的 matplotlib 脚本，**开头必须粘贴下面这段 preamble**，之后所有标题/坐标轴/图例/注解自动生效，无需对每个元素单独设置：
+
 ```python
-ax.annotate('标注', xy=..., fontproperties=cn_font)
-ax.bar_label(bars, labels=['中文'], fontproperties=cn_font)
+import os, matplotlib, matplotlib.font_manager as _fm
+
+def _setup_cn_font():
+    for _p in [
+        '/System/Library/Fonts/Hiragino Sans GB.ttc',         # macOS
+        '/System/Library/Fonts/STHeiti Medium.ttc',            # macOS
+        '/System/Library/Fonts/PingFang.ttc',                  # macOS
+        '/Library/Fonts/Arial Unicode MS.ttf',                 # macOS
+        'C:/Windows/Fonts/msyh.ttc',                           # Windows
+        'C:/Windows/Fonts/simhei.ttf',                         # Windows
+        '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',     # Linux
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',  # Linux
+        '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',  # Linux
+    ]:
+        if os.path.exists(_p):
+            _fm.fontManager.addfont(_p)
+            matplotlib.rcParams['font.sans-serif'] = [_fm.FontProperties(fname=_p).get_name()] + matplotlib.rcParams['font.sans-serif']
+            matplotlib.rcParams['axes.unicode_minus'] = False
+            return
+    for _f in _fm.fontManager.ttflist:  # fallback: search font cache
+        if any(_k in _f.name for _k in ('CJK', 'Heiti', 'YaHei', 'WenQuanYi', 'Hiragino', 'PingFang', 'STHeiti')):
+            matplotlib.rcParams['font.sans-serif'] = [_f.name] + matplotlib.rcParams['font.sans-serif']
+            matplotlib.rcParams['axes.unicode_minus'] = False
+            return
+
+_setup_cn_font()
 ```
 
 ---
@@ -446,15 +474,9 @@ Returns: `{status: "cancelling"|"killed"|"<terminal>", note?}`
 
 **Return value**:
 - `path`: Absolute path of the image on the server
-- `web_url`: Relative path of the image (can be used with `output_file(action=download)` to generate a download link)
-- `inline_image`: Markdown in the format `![Generated Image](/output/...)`, which can be pasted directly into a reply for the user to see the image
+- `web_url`: Relative path of the image
 
-**Usage**: After receiving `inline_image`, paste it directly into the reply text:
-```
-Sure, here is the generated image:
-
-![Generated Image](/output/A/nb_1234567890.jpg)
-```
+**Delivery**: Image is automatically sent to the user's channel (web inline / Feishu / WeCom / WeChat). The tool result will confirm delivery. **Do NOT embed image markdown or URL in your reply** — just describe the result in plain text.
 
 **Examples**:
 ```json
@@ -816,7 +838,7 @@ to construct a per-user isolated working path — never use a shared fixed path:
 11. **web_fetch first**: try before browser; use browser only when JS rendering is required.
 12. **Read files**: use read_file for all types — .docx/.pptx/.xlsx (text), .pdf (add pages="1-5" to select range or render=true for scanned), images .jpg/.png/.gif/.webp (visual analysis). Never exec/Python libs.
 13. **Write Office/PDF**: output_file(write, filename="xxx.docx/xlsx/pptx/pdf") — server converts by extension. Never exec/Python libs.
-14. **Files produced by exec**: Any file generated by an exec command (charts, exports, archives, reports…) is invisible until registered. Always call `output_file(action=download, file_path=<path>)` immediately after exec. For images this triggers auto-delivery and records `[N images auto-delivered]` in the subagent result; for all files it returns a `download_url` you must include in your reply. Skipping this call means the file is inaccessible to the user and parent agent.
+14. **Files produced by exec_run**: ⚠️ 只有 `exec_run` 返回成功后（`status:"done"`），文件才真正存在。**禁止**在 `exec` 返回 `pending_approval` 后立即处理文件——此时命令尚未执行。exec_run 返回后：优先方案 A（脚本 `print(abs_path)`）或方案 B（保存到 `output/` 目录）会触发系统自动投递图片，结果中含 `imageSentNote`（按指示嵌入 markdown）或 `filesSentNote`（含 `download_url`）。仅当自动投递未触发时，才调 `output_file(action=download, file_path=<path>)` 兜底——对图片同样触发自动投递，对其他文件返回 `download_url` 供用户下载。
 15. **Temp dir isolation**: In LLM-direct skill steps (no script), call `get_session_info` first and use `session_id` to build an isolated path: `/tmp/{skill_id}_{session_id}/`. Never use a hardcoded shared `/tmp/xxx` path.
 16. **spawn_subagent pattern**: Spawn when a task is complex/time-consuming, or to fan out parallel subtasks (one call per task); immediately call `notify(action=progress)`; then **stop and wait** — system injects a batch result when all tasks finish. Use `cancel_subtask` to abort; check returned `status` — if already terminal, no action needed.
     **label**: Always pass a short label (2–8 words) for readable notifications. Without: `#7`; with: `#7「Competitor research」`.
@@ -824,3 +846,55 @@ to construct a per-user isolated working path — never use a shared fixed path:
     **retain_hours**: Set only when result must survive beyond global retention (e.g. 7-day report). Leave 0 otherwise.
     **cancel_subtask force**: Prefer `force=false` (graceful → `cancelled`); use `force=true` only when unresponsive (immediate → `killed`).
     **Batch results**: Process all subagent results in one reply. Include `![image](url)` verbatim. If `[N images auto-delivered]`, acknowledge only — don't re-embed. Present `download_url` as a Markdown link.
+17. **图片投递规则**：所有产图/截图工具（`desktop screenshot`、`browser screenshot`、`nano_banana`、`exec` 生成图）都由系统自动推送到用户渠道——**不要**在回复文字中嵌入 `![](url)`，除非工具结果的 `imageSentNote` 字段明确要求嵌入指定 markdown（仅 `exec` 主 agent 场景）。若用户要求将服务器上**已有**图片文件发给自己，调 `output_file(action=download, file_path=<path>)` 即可自动投递。
+18. **matplotlib 中文字体**：每一个调用 matplotlib 的 Python 脚本（无论标签是否含中文），必须在文件最顶部（`import matplotlib.pyplot` 之前）**原样复制**本文件开头的 `_get_cn_font` / `_apply_cn_font` 代码块，并在所有 axes 设置完成后调用 `_apply_cn_font(ax, cn_font)`。不允许省略，不允许改用 `rcParams['font.sans-serif']`。
+
+---
+
+## desktop（桌面控制，需 DESKTOP_ENABLED=true）
+
+通过 `action` 参数分发所有桌面操作。
+
+**Action 一览**：
+
+| action | 描述 | 必填参数 |
+|--------|------|----------|
+| `screenshot` | 截取全屏；图片**自动投递**到用户渠道（web 内联 / 飞书 / 企微 / 微信原生图片），LLM 同步可见用于分析 | — |
+| `get_screen_size` | 返回屏幕分辨率（如 `1920x1080`） | — |
+| `mouse_move` | 移动鼠标到指定坐标 | `x`, `y` |
+| `left_click` | 左键单击 | `x`, `y` |
+| `right_click` | 右键单击 | `x`, `y` |
+| `double_click` | 左键双击 | `x`, `y` |
+| `type` | 输入文本 | `text` |
+| `key` | 按下按键或组合键 | `key` |
+| `scroll` | 滚动 | `x`, `y`, `direction`(up/down/left/right), `amount`(默认 3) |
+| `drag` | 鼠标拖拽 | `start_x`, `start_y`, `end_x`, `end_y` |
+
+**key 格式示例**：`ctrl+c`、`ctrl+v`、`ctrl+alt+t`、`Return`、`escape`、`Tab`、`BackSpace`、`F5`
+
+**推荐工作流**：先 `screenshot` → 分析界面 → 执行操作 → 再 `screenshot` 确认结果
+
+**投递规则**：`screenshot` 执行后图片已自动发送到用户聊天。**不要**在回复文字中嵌入图片 markdown 或 URL，用文字描述结果即可。
+
+**平台依赖**：
+
+| 平台 | 截图 | 鼠标/键盘 | 权限要求 |
+|------|------|-----------|----------|
+| macOS | 内置 `screencapture` | `brew install cliclick` | 辅助功能 + 屏幕录制（系统偏好设置手动授权） |
+| Linux | `apt install scrot` | `apt install xdotool` | X11 显示（无头服务器须配置 `DISPLAY=:0` 或 Xvfb） |
+| Windows | PowerShell 内置 | PowerShell 内置 | 以管理员身份运行（SendKeys 需焦点窗口） |
+
+**使用示例**：
+```json
+{"action": "screenshot"}
+{"action": "get_screen_size"}
+{"action": "mouse_move", "x": 500, "y": 300}
+{"action": "left_click", "x": 500, "y": 300}
+{"action": "double_click", "x": 500, "y": 300}
+{"action": "right_click", "x": 500, "y": 300}
+{"action": "type", "text": "Hello, World!"}
+{"action": "key", "key": "ctrl+c"}
+{"action": "key", "key": "Return"}
+{"action": "scroll", "x": 500, "y": 400, "direction": "down", "amount": 5}
+{"action": "drag", "start_x": 100, "start_y": 100, "end_x": 400, "end_y": 200}
+```

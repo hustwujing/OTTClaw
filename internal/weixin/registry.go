@@ -60,6 +60,11 @@ func newWeixinWriter(ownerUserID, sessionID, peerID, contextToken string, client
 	}
 
 	w.BaseWriter.SendFn = func(text string) {
+		// 剥离 kimi 等 reasoning 模型在 text 字段内嵌的思考链：
+		// 此类模型不输出 <think>，仅以 </think> 标记思考结束；标记之前的内容均为思考链，需丢弃。
+		if idx := strings.Index(text, "</think>"); idx >= 0 {
+			text = text[idx+len("</think>"):]
+		}
 		text = strings.TrimSpace(text)
 		if text == "" {
 			text = "✅ 已完成"

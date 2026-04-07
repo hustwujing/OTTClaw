@@ -35,6 +35,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -51,6 +52,7 @@ import (
 	"github.com/creack/pty"
 
 	"OTTClaw/config"
+	"OTTClaw/internal/channel"
 )
 
 // ansiEscape 匹配 ANSI 转义序列，用于清理 PTY 输出中的终端控制字符。
@@ -140,6 +142,12 @@ type execSession struct {
 
 	exitCode int
 	timedOut bool
+
+	// AGENT_REGISTER_FILE 路径；启动前创建，exec 结束后读取并删除
+	regFile string
+
+	// AGENT_OUTPUT_DIR 路径；session 级隔离目录，exec 结束后扫描并搬空
+	outputDir string
 }
 
 // writeOutput 同时写入全量缓冲和增量缓冲
@@ -196,12 +204,18 @@ func init() {
 			}
 			pendingStore.mu.Unlock()
 
-			// 清理已完成且过期的 session
+			// 清理已完成且过期的 session（同时清理孤立的注册文件）
 			execRegistry.mu.Lock()
 			for id, s := range execRegistry.sessions {
 				select {
 				case <-s.doneCh:
 					if now.Sub(s.startedAt) > execSessionTTL {
+						if s.regFile != "" {
+							_ = os.Remove(s.regFile)
+						}
+						if s.outputDir != "" {
+							_ = os.RemoveAll(s.outputDir)
+						}
 						delete(execRegistry.sessions, id)
 					}
 				default:
@@ -252,9 +266,9 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 		createdAt:  time.Now(),
 	}
 
-	// 子 agent 后台无人值守，跳过审批步骤直接执行。
-	// 安全性：用户在 spawn_subagent 时已授权子 agent 执行指定任务，exec 属于授权范围内。
-	if taskIDFromCtx(ctx) > 0 {
+	// 子 agent 后台无人值守，或渠道不支持交互式确认框（微信/飞书等），直接执行。
+	// 安全性：用户在 spawn_subagent 时已授权子 agent 执行，微信/飞书等渠道无法弹确认框。
+	if taskIDFromCtx(ctx) > 0 || channel.ExecAutoApproveFromCtx(ctx) {
 		return runExecCommand(ctx, pending)
 	}
 
@@ -273,15 +287,27 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 			"message":       msg,
 			"confirm_label": "确认执行",
 			"cancel_label":  "取消",
+			"pending_id":    pending.id,
 		})
 	}
 
-	return execMarshal(map[string]any{
-		"status":     "pending_approval",
-		"pending_id": pending.id,
-		"command":    args.Command,
-		"hint":       "Command is awaiting user approval. Stop and wait. After user confirms, call exec_run(pending_id) to execute. If user cancels, do not call exec_run.",
-	}), nil
+	// 使用具名结构体而非 map，确保 JSON 字段顺序固定：
+	// status 和 pending_id 必须排在 command（可能非常长）之前，
+	// 否则 DB 截断（TOOL_RESULT_MAX_DB_BYTES）会在 pending_id 出现之前截断内容，
+	// 导致下轮对话中 LLM 无法读取 pending_id 并产生幻觉。
+	type pendingApprovalResult struct {
+		Status    string `json:"status"`
+		PendingID string `json:"pending_id"`
+		Command   string `json:"command"`
+		Hint      string `json:"hint"`
+	}
+	b, _ := json.Marshal(pendingApprovalResult{
+		Status:    "pending_approval",
+		PendingID: pending.id,
+		Command:   args.Command,
+		Hint:      "Command is awaiting user approval. Stop and wait. After user confirms, call exec_run(pending_id) to execute. If user cancels, do not call exec_run.",
+	})
+	return string(b), nil
 }
 
 // ── handleExecRun：用户已确认，真正执行命令 ───────────────────────────────────
@@ -335,6 +361,20 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 		readDone:  make(chan struct{}),
 	}
 
+	// 启动前创建 session 级隔离输出目录（user + session 双隔离）
+	// 路径含随机 session ID，不同用户、不同会话互不可见
+	outputDir := filepath.Join(os.TempDir(), "agent_out_"+sess.id)
+	if err := os.MkdirAll(outputDir, 0o755); err == nil {
+		sess.outputDir = outputDir
+	}
+
+	// 启动前创建注册文件，脚本通过 $AGENT_REGISTER_FILE 主动追加生成的文件路径
+	regFile := filepath.Join(os.TempDir(), "agent_reg_"+sess.id)
+	if f, err := os.Create(regFile); err == nil {
+		f.Close()
+		sess.regFile = regFile
+	}
+
 	execRegistry.mu.Lock()
 	execRegistry.sessions[sess.id] = sess
 	execRegistry.mu.Unlock()
@@ -352,13 +392,18 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 		return killGroup(cmd)
 	}
 
-	if len(p.env) > 0 {
-		env := os.Environ()
-		for k, v := range p.env {
-			env = append(env, k+"="+v)
-		}
-		cmd.Env = env
+	// 始终注入 AGENT_OUTPUT_DIR 和 AGENT_REGISTER_FILE（无论 p.env 是否为空）
+	env := os.Environ()
+	if sess.outputDir != "" {
+		env = append(env, "AGENT_OUTPUT_DIR="+sess.outputDir)
 	}
+	if sess.regFile != "" {
+		env = append(env, "AGENT_REGISTER_FILE="+sess.regFile)
+	}
+	for k, v := range p.env {
+		env = append(env, k+"="+v)
+	}
+	cmd.Env = env
 
 	// 分配 PTY：bash 认为自己在真实终端里（支持进度条、颜色、交互程序）
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 50, Cols: 220})
@@ -390,13 +435,23 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 		}
 	}()
 
-	// Wait goroutine：等待进程退出 → 关闭 ptmx → 等待 read goroutine 退出 → 关闭 doneCh
+	// Wait goroutine：等待进程退出 → 等待 read goroutine 耗尽缓冲 → 关闭 ptmx → 关闭 doneCh
+	//
+	// 注意顺序：必须先 <-sess.readDone 再 ptmx.Close()。
+	// 进程退出后，PTY slave 侧关闭，内核 PTY buffer 里可能还有未读数据；
+	// 若在 read goroutine 读完之前调用 ptmx.Close()，会中断正在进行的 Read，
+	// 导致最后一批输出（如 Python print(output_path)）丢失，output 变成空字符串。
+	// 加 3s 超时兜底，防止 read goroutine 因异常无法退出时永远阻塞。
 	go func() {
 		defer cancelCmd()
 		defer close(sess.doneCh)
 		_ = cmd.Wait()
-		ptmx.Close()    // 触发 read goroutine 的 EIO/EOF
-		<-sess.readDone // 确保所有输出已落入缓冲
+		// 等 read goroutine 自然因 slave 关闭得到 EIO 并退出，确保全部输出已落盘
+		select {
+		case <-sess.readDone:
+		case <-time.After(3 * time.Second):
+		}
+		ptmx.Close() // 全部数据已读完，现在关闭 PTY master
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			sess.timedOut = true
 			sess.exitCode = -1
@@ -424,7 +479,7 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 
 	select {
 	case <-sess.doneCh:
-		return execDoneResult(sess), nil
+		return execDoneResult(sess, userIDFromCtx(ctx)), nil
 
 	case <-yieldTimer.C:
 		return execMarshal(map[string]any{
@@ -452,7 +507,7 @@ func killGroup(cmd *exec.Cmd) error {
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
 
-func execDoneResult(sess *execSession) string {
+func execDoneResult(sess *execSession, userID string) string {
 	elapsed := int(time.Since(sess.startedAt).Seconds())
 	output := sess.fullOutput()
 	// 空输出时注入 exit code 标注，防止 LLM 因空工具结果误判任务已结束。
@@ -469,24 +524,68 @@ func execDoneResult(sess *execSession) string {
 	if sess.timedOut {
 		result["error"] = fmt.Sprintf("command timed out and was killed (timeout: %vs)", config.Cfg.ToolExecTimeoutSec)
 	}
-	// 自动检测 exec 期间在 output 目录下新生成的图片文件。
-	// processToolResult 收到 generatedImages 后会对每张图片调用 WriteImage，
-	// 无需 LLM 额外调用 output_file(action=download)。
-	imgs := scanNewOutputImages(sess.startedAt)
+	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
+	seen := make(map[string]bool)     // web 路径去重
+	seenFile := make(map[string]bool) // 文件名去重
+	var imgs []string
+	var genFiles []execGeneratedFile
 
-	// 额外扫描 stdout 中打印的文件路径（处理脚本将文件保存到 /tmp/ 等非 output 目录的场景）。
-	// 图片自动复制到 output 目录并追加到 imgs；所有文件均注册临时下载 token 并记入 generatedFiles。
-	stdoutImgs, genFiles := scanFilesFromOutput(sess.fullOutput(), sess.startedAt)
-	seen := make(map[string]bool)
-	for _, u := range imgs {
-		seen[u] = true
-	}
-	for _, u := range stdoutImgs {
-		if !seen[u] {
-			imgs = append(imgs, u)
-			seen[u] = true
+	// ── 优先一：扫描 AGENT_OUTPUT_DIR（session 级隔离目录，最可靠）──────────────
+	if sess.outputDir != "" {
+		dirImgs, dirFiles := scanAgentOutputDir(sess.outputDir, outputAbs, userID)
+		for _, u := range dirImgs {
+			if !seen[u] {
+				seen[u] = true
+				imgs = append(imgs, u)
+			}
+		}
+		for _, f := range dirFiles {
+			seenFile[f.Name] = true
+			genFiles = append(genFiles, f)
 		}
 	}
+
+	// ── 优先二：读取 AGENT_REGISTER_FILE（文件保存在其他位置时手动注册）─────────
+	if sess.regFile != "" {
+		regImgs, regFiles := processRegFile(sess.regFile, outputAbs, userID)
+		for _, u := range regImgs {
+			if !seen[u] {
+				seen[u] = true
+				imgs = append(imgs, u)
+			}
+		}
+		for _, f := range regFiles {
+			if !seenFile[f.Name] {
+				seenFile[f.Name] = true
+				genFiles = append(genFiles, f)
+			}
+		}
+	}
+
+	// ── 兜底一：扫描 output 目录新增图片（脚本直接写 output/ 的场景）────────────
+	for _, u := range scanNewOutputImages(sess.startedAt) {
+		if !seen[u] {
+			seen[u] = true
+			imgs = append(imgs, u)
+		}
+	}
+
+	// ── 兜底二：解析 stdout 打印的路径（未使用 AGENT_REGISTER_FILE 的旧脚本）────
+	stdoutImgs, stdoutFiles := scanFilesFromOutput(sess.fullOutput(), sess.startedAt, userID)
+	for _, u := range stdoutImgs {
+		if !seen[u] {
+			seen[u] = true
+			imgs = append(imgs, u)
+		}
+	}
+	// 兜底二 genFiles 去重（避免与上游结果重复）
+	for _, f := range stdoutFiles {
+		if !seenFile[f.Name] {
+			seenFile[f.Name] = true
+			genFiles = append(genFiles, f)
+		}
+	}
+
 	if len(imgs) > 0 {
 		result["generatedImages"] = imgs
 	}
@@ -534,10 +633,10 @@ type execGeneratedFile struct {
 //   - 是绝对路径
 //   - 文件存在且 mtime 不早于 since-1s（exec 开始时间带 1s 缓冲）
 //
-// 图片文件（.png/.jpg/…）：若不在 output 目录内，先复制到 output/_auto/，
+// 图片文件（.png/.jpg/…）：若不在 output 目录内，移动到 output/<userID>/<bucket>/，
 // 再通过 RegisterFileDownload 获取 webURL，追加到返回的 images 列表。
 // 所有文件：注册临时下载 token，追加到返回的 files 列表。
-func scanFilesFromOutput(output string, since time.Time) (images []string, files []execGeneratedFile) {
+func scanFilesFromOutput(output string, since time.Time, userID string) (images []string, files []execGeneratedFile) {
 	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
 	threshold := since.Add(-time.Second)
 	seen := make(map[string]bool)
@@ -564,9 +663,9 @@ func scanFilesFromOutput(output string, since time.Time) (images []string, files
 
 			absPath := candidate
 
-			// 图片且不在 output 目录：复制到 output/_auto/ 使其可被 web 服务
+			// 图片且不在 output 目录：按分桶规则移动到 output/<userID>/<bucket>/
 			if isImagePath(absPath) && outputAbs != "" && !strings.HasPrefix(absPath, outputAbs) {
-				if dest, copyErr := copyFileToOutput(absPath, outputAbs); copyErr == nil {
+				if dest, moveErr := moveFileToOutputBucket(absPath, outputAbs, userID); moveErr == nil {
 					absPath = dest
 				}
 			}
@@ -588,10 +687,101 @@ func scanFilesFromOutput(output string, since time.Time) (images []string, files
 	return
 }
 
-// copyFileToOutput 将文件复制到 outputAbs/_auto/ 目录，返回目标绝对路径。
+// scanAgentOutputDir 扫描 AGENT_OUTPUT_DIR 目录中的所有文件，按分桶规则移动到 output/<userID>/<bucket>/。
+// 扫描完成后删除整个目录（所有文件已移走，目录本身已空）。
+// 支持子目录递归扫描，适合脚本生成多个文件的场景。
+func scanAgentOutputDir(agentOutputDir, outputAbs, userID string) (images []string, files []execGeneratedFile) {
+	if agentOutputDir == "" {
+		return
+	}
+	defer os.RemoveAll(agentOutputDir)
+
+	_ = filepath.Walk(agentOutputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		absPath := path
+		// 移动到 output 分桶
+		if outputAbs != "" {
+			if dest, moveErr := moveFileToOutputBucket(absPath, outputAbs, userID); moveErr == nil {
+				absPath = dest
+			}
+		}
+		dlURL, webURL, regErr := RegisterFileDownload(absPath)
+		if regErr != nil {
+			return nil
+		}
+		files = append(files, execGeneratedFile{
+			Name:        info.Name(),
+			DownloadURL: dlURL,
+		})
+		if webURL != "" {
+			images = append(images, webURL)
+		}
+		return nil
+	})
+	return
+}
+
+// processRegFile 读取 AGENT_REGISTER_FILE，处理其中注册的所有文件路径。
+// 每行一个绝对路径，支持图片和任意文件类型。
+// 不在 output 目录内的文件按分桶规则移动到 output/<userID>/<bucket>/；
+// 读取完成后删除注册文件。
+func processRegFile(regFile, outputAbs, userID string) (images []string, files []execGeneratedFile) {
+	defer os.Remove(regFile)
+
+	data, err := os.ReadFile(regFile)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return
+	}
+
+	seen := make(map[string]bool)
+	for _, raw := range strings.Split(string(data), "\n") {
+		path := strings.TrimSpace(raw)
+		if path == "" || seen[path] {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		seen[path] = true
+
+		absPath := path
+		// 不在 output 目录：按分桶规则移动
+		if outputAbs != "" && !strings.HasPrefix(absPath, outputAbs) {
+			if dest, moveErr := moveFileToOutputBucket(absPath, outputAbs, userID); moveErr == nil {
+				absPath = dest
+			}
+		}
+
+		dlURL, webURL, regErr := RegisterFileDownload(absPath)
+		if regErr != nil {
+			continue
+		}
+
+		files = append(files, execGeneratedFile{
+			Name:        filepath.Base(path), // 使用原始文件名
+			DownloadURL: dlURL,
+		})
+		if webURL != "" {
+			images = append(images, webURL)
+		}
+	}
+	return
+}
+
+// moveFileToOutputBucket 将文件移动到 outputAbs/<userID>/<bucket>/ 目录，返回目标绝对路径。
+// bucket 取文件名 MD5 的第二位十六进制字符（大写），与 write_output.go 分桶规则一致。
+// 优先使用 os.Rename（同一文件系统零拷贝），跨文件系统时降级为复制后删除源文件。
 // 若目标同名文件已存在，加毫秒时间戳后缀避免覆盖。
-func copyFileToOutput(srcPath, outputAbs string) (string, error) {
-	destDir := filepath.Join(outputAbs, "_auto")
+func moveFileToOutputBucket(srcPath, outputAbs, userID string) (string, error) {
+	if userID == "" {
+		userID = "_shared"
+	}
+	sum := md5.Sum([]byte(filepath.Base(srcPath)))
+	bucketDir := strings.ToUpper(string(fmt.Sprintf("%x", sum)[1]))
+	destDir := filepath.Join(outputAbs, userID, bucketDir)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", err
 	}
@@ -603,11 +793,20 @@ func copyFileToOutput(srcPath, outputAbs string) (string, error) {
 		name := strings.TrimSuffix(baseName, ext)
 		destPath = filepath.Join(destDir, fmt.Sprintf("%s_%d%s", name, time.Now().UnixMilli(), ext))
 	}
+	// 优先 Rename（同一文件系统零拷贝）
+	if err := os.Rename(srcPath, destPath); err == nil {
+		return destPath, nil
+	}
+	// 跨文件系统降级为复制后删除
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return "", err
 	}
-	return destPath, os.WriteFile(destPath, data, 0o644)
+	if err := os.WriteFile(destPath, data, 0o644); err != nil {
+		return "", err
+	}
+	_ = os.Remove(srcPath)
+	return destPath, nil
 }
 
 func execMarshal(v map[string]any) string {

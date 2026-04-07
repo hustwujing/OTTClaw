@@ -1710,7 +1710,7 @@ function showInteractive(bubble, kind, data) {
       const nBtn = el('button', 'btn btn-ghost');
       nBtn.textContent = nLabel;
       const pick = v => { [yBtn, nBtn].forEach(b => b.disabled = true); resolve(v); };
-      yBtn.onclick = () => pick(yLabel);
+      yBtn.onclick = () => pick(data.pending_id ? `${yLabel} ${data.pending_id}` : yLabel);
       nBtn.onclick = () => pick(nLabel);
       btns.appendChild(yBtn); btns.appendChild(nBtn);
       wrap.appendChild(msgEl); wrap.appendChild(btns);
@@ -1939,13 +1939,15 @@ function appendProg(bubble, step, detail, callID, ms) {
   refreshCount();
 }
 
-// clearLLMWait 清除 proc-log 中的"思考中"等待行（llm_call 步骤）
+// clearLLMWait 清除 proc-log 中所有未完成的等待行（step-pending 状态）。
+// 包括：llm_call（思考中）、compress_start（正在压缩）等 pending 步骤。
+// 会话结束时调用，确保所有悬挂的 spinner 被移除，不会在响应结束后继续转圈。
 // 若清完后无剩余步骤，则重新隐藏 proc-log（避免显示空的"0步"）
 function clearLLMWait(bubble) {
   const procLog = bubble?.querySelector('.proc-log');
   if (!procLog) return;
   const steps = procLog.querySelector('.proc-steps');
-  steps.querySelectorAll('.proc-step[data-step="llm_call"]').forEach(r => r.remove());
+  steps.querySelectorAll('.proc-step.step-pending').forEach(r => r.remove());
   const count = steps.children.length;
   procLog.querySelector('.proc-count').textContent = `${count} 步`;
   if (count === 0) procLog.classList.add('hidden');

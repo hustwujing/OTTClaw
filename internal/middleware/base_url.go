@@ -10,14 +10,21 @@ package middleware
 import (
 	"github.com/gin-gonic/gin"
 
+	"OTTClaw/config"
 	"OTTClaw/internal/storage"
 	"OTTClaw/internal/tool"
 )
 
 // BaseURL 是全局中间件，从 HTTP 请求中提取 scheme://host 并写入缓存。
 // 支持 X-Forwarded-Proto 和 X-Forwarded-Host（适配反向代理 / HTTPS 终止）。
+// 若 SERVER_PUBLIC_URL 已显式配置，则跳过动态推断（不覆盖固定公网地址）。
 func BaseURL() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// SERVER_PUBLIC_URL 已配置时，不从请求头动态推断（避免覆盖固定地址）
+		if config.Cfg.ServerPublicURL != "" {
+			c.Next()
+			return
+		}
 		scheme := "http"
 		if c.Request.TLS != nil {
 			scheme = "https"

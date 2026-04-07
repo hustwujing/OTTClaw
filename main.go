@@ -53,7 +53,11 @@ func main() {
 	storage.MigrateAppConfig()
 
 	// ---- 1.6 从持久化配置恢复 service base URL（供 Feishu 等非 HTTP 渠道构造完整下载链接） ----
-	if appCfg, err := storage.GetAppConfig(); err == nil && appCfg.ServiceBaseURL != "" {
+	// 优先使用 SERVER_PUBLIC_URL 环境变量（固定公网地址），回退到上次 HTTP 请求缓存的地址。
+	if pub := config.Cfg.ServerPublicURL; pub != "" {
+		tool.SetServerBaseURL(pub)
+		logger.Info("main", "", "", "service base URL (public): "+pub, 0)
+	} else if appCfg, err := storage.GetAppConfig(); err == nil && appCfg.ServiceBaseURL != "" {
 		tool.SetServerBaseURL(appCfg.ServiceBaseURL)
 		logger.Info("main", "", "", "service base URL restored: "+appCfg.ServiceBaseURL, 0)
 	}

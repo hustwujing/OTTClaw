@@ -53,7 +53,7 @@ func (a *FeishuAdapter) Connect(ctx context.Context, ownerUserID string, dispatc
 		wf := func(sessID string) channel.StreamWriter {
 			return newFeishuWriter(peer, receiveIDType, ownerUserID, sessID, appID)
 		}
-		dispatch(enrichedCtx, peer, text, wf)
+		dispatch(channel.WithExecAutoApprove(enrichedCtx), peer, text, wf)
 	}
 
 	eventHandler := dispatcher.NewEventDispatcher("", "").

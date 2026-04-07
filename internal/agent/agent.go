@@ -336,8 +336,13 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				logger.Debug("agent", userID, sessionID,
 					fmt.Sprintf("上下文压缩检查 est_tokens=%d threshold=%d, will compress messages",
 						estToks, config.Cfg.MaxContextTokens), 0)
+				// 无论本次压缩是否成功，都标记为已尝试，避免同一 Run() 内反复触发。
+				// 当 compressHistory 返回 didCompress=false（历史全在 keepRecent 窗口内、
+				// 找不到 user 消息切割点等），hasCompressed 仍需置 true 防止下轮再触发。
+				hasCompressed = true
 				// 预检：历史消息 > keepRecent 才会真正压缩，才值得推送 compress_start。
 				// 避免新会话中大文件读取导致阈值超限但实际无历史可压的"假压缩"事件。
+				compressStartSent := false
 				if len(messages)-1 > config.Cfg.CompressKeepRecent {
 					// Fix 1: 压缩前同步 flush memory，防止旧消息被压缩后信息永久丢失。
 					// 与 Hermes 行为一致：压缩即将抹掉历史，需先让 LLM 保存有价值的内容。
@@ -350,6 +355,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 						logger.Debug("agent", userID, sessionID, "[memory-flush] pre-compress flush done", 0)
 					}
 					_ = writer.WriteProgress("compress_start", "聊太多了，有点儿乱，让我先理一下…", "", time.Since(start).Milliseconds())
+					compressStartSent = true
 				}
 				compressed, didCompress, compressErr := a.compressHistory(ctx, userID, sessionID, messages)
 				if compressErr != nil {
@@ -357,7 +363,6 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					_ = writer.WriteProgress("compress_error", "没理清楚，咱们先继续", "", time.Since(start).Milliseconds())
 				} else if didCompress {
 					messages = compressed
-					hasCompressed = true
 					// 压缩后用最新 KV 重建系统 prompt：
 					// skill(action=load) 等工具在本 Run() 内写入了 _active_skill_id，
 					// 但 buildSystemPrompt 在循环外只调用了一次，messages[0] 尚未包含 activeSkillSection。
@@ -370,8 +375,11 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					logger.Debug("agent", userID, sessionID,
 						fmt.Sprintf("context compressed new_tokens=%d, old_tokens=%d, did_compressed: %v", estimateTokens(messages), estToks, didCompress), 0)
 					_ = writer.WriteProgress("compress_done", "理清楚了，咱们继续…", "", time.Since(start).Milliseconds())
+				} else if compressStartSent {
+					// compressHistory 找不到安全切割点（如对话中只有一条 user 消息，其余全为工具调用），
+					// 无法真正压缩，但 compress_start 已发出，必须回一个结束事件，否则前端 spinner 挂起。
+					_ = writer.WriteProgress("compress_done", "继续…", "", time.Since(start).Milliseconds())
 				}
-				// didCompress=false：历史消息不足 keepRecent 或找不到安全切割点，静默跳过
 			}
 		}
 
@@ -1568,14 +1576,12 @@ func extractGeneratedImages(resultJSON string) []string {
 
 // injectImageDeliveryNote 从工具结果中移除 generatedImages 字段，注入交付说明。
 //
-// 主 agent（isSubagent=false）：注入含 markdown 语法的 imageSentNote，
-// 指示 LLM 在回复文本里嵌入图片，直接在对话气泡中渲染。
-//
-// 子 agent（isSubagent=true）：图片已通过 WriteImage → subagent_image 事件
-// 在卡片内展示，无需 LLM 再次嵌入 markdown（否则卡片文本区会出现多余渲染）。
-// 仅注入纯文字说明，LLM 用文字描述结果即可。
-// 图片 URL 由 SubagentWriter.result() 追加到 sub_tasks.result，父 agent
-// 读取后会在自己的回复气泡里渲染图片。
+// 无论主 agent 还是子 agent，均告知 LLM"图片已投递，不要在回复文字中嵌入 markdown"：
+//   - 主 agent：图片已通过 WriteImage 在所有渠道原生投递（Web 内联事件、飞书/企微/微信
+//     原生图片消息）。嵌入 markdown 会导致 Web 重复展示、企微/微信输出原始 markdown 文字。
+//   - 子 agent：图片已通过 WriteImage → subagent_image 事件在卡片内展示，
+//     无需再嵌入 markdown。图片 URL 由 SubagentWriter.result() 追加到
+//     sub_tasks.result，父 agent 读取后会在自己的回复气泡里渲染图片。
 func injectImageDeliveryNote(resultJSON string, deliveredURLs []string, isSubagent bool) string {
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(resultJSON), &obj); err != nil {
@@ -1589,14 +1595,12 @@ func injectImageDeliveryNote(resultJSON string, deliveredURLs []string, isSubage
 			len(deliveredURLs),
 		)
 	} else {
-		// 主 agent：指示 LLM 在回复里嵌入图片 markdown
-		markdowns := make([]string, 0, len(deliveredURLs))
-		for _, u := range deliveredURLs {
-			markdowns = append(markdowns, fmt.Sprintf("![图片](%s)", u))
-		}
+		// 主 agent：图片已通过 WriteImage 直接投递到用户（Web 内联、飞书/企微/微信原生图片消息），
+		// LLM 无需再嵌入 markdown——嵌入会导致 Web 重复展示、企微/微信显示原始 markdown 文字。
 		obj["imageSentNote"] = fmt.Sprintf(
-			"%d image(s) generated and delivered. Include each image in your reply using these exact markdown snippets (do not alter the URL): %s",
-			len(deliveredURLs), strings.Join(markdowns, " "),
+			"%d image(s) have been delivered directly to the user via the image delivery system. "+
+				"DO NOT embed image markdown in your reply — just describe or comment on the result in plain text.",
+			len(deliveredURLs),
 		)
 	}
 	b, err := json.Marshal(obj)

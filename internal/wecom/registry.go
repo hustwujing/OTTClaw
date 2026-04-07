@@ -11,6 +11,8 @@ package wecom
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -108,9 +110,19 @@ func (w *wecomWriter) WriteSpeaker(_ string) error                  { return nil
 func (w *wecomWriter) WriteInteractive(_ string, _ any) error       { return nil }
 
 // WriteImage 上传本地图片并通过 AI Bot 发送给用户
+// path 可为绝对路径，也可为 web 相对路径（如 /output/xxx.png），
+// 后者会被转换为 {cwd}/output/xxx.png 的绝对路径。
 func (w *wecomWriter) WriteImage(path string) error {
 	if path == "" {
 		return nil
+	}
+	// Web 路径（/output/xxx.png）→ 本地绝对路径（{cwd}/output/xxx.png）
+	if strings.HasPrefix(path, "/") {
+		if candidate, err := filepath.Abs(strings.TrimPrefix(path, "/")); err == nil {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				path = candidate
+			}
+		}
 	}
 	mediaID, err := w.client.UploadMedia(path)
 	if err != nil {

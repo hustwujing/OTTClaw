@@ -299,6 +299,57 @@ func SendOptionsCard(appID, chatID, receiveIDType, title string, options []map[s
 	return parseAPIError(resp.Body)
 }
 
+// SendConfirmCard 以交互卡片形式展示待执行命令及确认指引。
+// 注意：Feishu Go SDK v3.5.3 WebSocket 模式下，card.action.trigger 回调被 SDK 忽略
+//（ws/client.go handleDataFrame 的 MessageTypeCard 分支直接 return），
+// 因此卡片不含可点击按钮，而是将 confirmChoice/cancelChoice 嵌入文字指引，
+// 由调用方在发送后继续调用 MarkPending 等待用户文字回复。
+func SendConfirmCard(appID, chatID, receiveIDType, markdownBody, confirmChoice, cancelChoice string) error {
+	token, err := GetToken(appID)
+	if err != nil {
+		return err
+	}
+
+	// 将确认指引附在消息体末尾，格式化展示命令内容
+	content := markdownBody + fmt.Sprintf("\n\n请回复「**%s**」或「%s」", confirmChoice, cancelChoice)
+
+	card := map[string]any{
+		"config": map[string]bool{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title":    map[string]string{"tag": "plain_text", "content": "待执行命令"},
+			"template": "orange",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag":     "lark_md",
+					"content": content,
+				},
+			},
+		},
+	}
+	cardJSON, _ := json.Marshal(card)
+
+	body, _ := json.Marshal(map[string]string{
+		"receive_id": chatID,
+		"msg_type":   "interactive",
+		"content":    string(cardJSON),
+	})
+
+	url := fmt.Sprintf(config.Cfg.FeishuAPIBase+"/open-apis/im/v1/messages?receive_id_type=%s", receiveIDType)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send confirm card: %w", err)
+	}
+	defer resp.Body.Close()
+	return parseAPIError(resp.Body)
+}
+
 // PostWebhook 向 Webhook URL 发送文本消息（不需要 Bot token）
 func PostWebhook(webhookURL, text string) error {
 	body, _ := json.Marshal(map[string]any{

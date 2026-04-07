@@ -60,7 +60,7 @@ func (a *WeixinAdapter) Connect(ctx context.Context, ownerUserID string, dispatc
 		wf := func(sessID string) channel.StreamWriter {
 			return newWeixinWriter(ownerUserID, sessID, fromUserID, contextToken, client)
 		}
-		dispatch(ctx, fromUserID, text, wf)
+		dispatch(channel.WithExecAutoApprove(ctx), fromUserID, text, wf)
 	}
 	client = NewClient(ownerUserID, onMessage)
 	setActiveClient(ownerUserID, client)

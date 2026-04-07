@@ -34,7 +34,10 @@ type LLMEndpointConfig struct {
 // AppConfig 全局配置结构体
 type AppConfig struct {
 	// 服务器
-	ServerPort string
+	ServerPort      string
+	ServerPublicURL string // SERVER_PUBLIC_URL：服务对外的完整 base URL（如 https://example.com）。
+	// 设置后，output_file 生成的 download_url 固定使用此值，适合飞书/企微/微信等
+	// 无法从请求头推断 URL 的渠道。留空则从 HTTP 请求的 Host header 动态推断。
 
 	// JWT
 	JWTSecret string
@@ -173,6 +176,9 @@ type AppConfig struct {
 
 	// 子 agent 任务清理
 	SubTaskRetentionDays int // SUBTASK_RETENTION_DAYS：终态子任务保留天数，超出后自动删除；默认 7，0 禁用
+
+	// 桌面控制
+	DesktopEnabled bool // DESKTOP_ENABLED：是否启用桌面控制工具（截图/鼠标/键盘），默认 false
 }
 
 // Cfg 全局配置单例，进程启动时初始化一次
@@ -221,6 +227,7 @@ func loadConfig() *AppConfig {
 
 	cfg := &AppConfig{
 		ServerPort:              getEnv("SERVER_PORT", "8080"),
+		ServerPublicURL:         getEnv("SERVER_PUBLIC_URL", ""),
 		JWTSecret:               getEnv("JWT_SECRET", "change-me-in-production-secret-key"),
 		LLMModel:                getEnv("LLM_MODEL", "gpt-4o"),
 		DatabaseDriver:          getEnv("DATABASE_DRIVER", "sqlite"),
@@ -297,6 +304,7 @@ func loadConfig() *AppConfig {
 		HonchoAppID:            getEnv("HONCHO_APP_ID", ""),
 		SubTaskRetentionDays:   getEnvInt("SUBTASK_RETENTION_DAYS", 7),
 		HonchoAppName:          getEnv("HONCHO_APP_NAME", "ottclaw"),
+		DesktopEnabled:         getEnvBool("DESKTOP_ENABLED", false),
 	}
 	cfg.LLMEndpoints = loadLLMEndpoints(cfg.LLMProvider, cfg.LLMMaxTokens, cfg.LLMRateLimit)
 	return cfg

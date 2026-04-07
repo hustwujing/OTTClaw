@@ -142,7 +142,7 @@ func newDLToken() (string, error) {
 }
 
 // handleServeFileDownload 为服务器上的文件生成临时下载链接。
-func handleServeFileDownload(_ context.Context, argsJSON string) (string, error) {
+func handleServeFileDownload(ctx context.Context, argsJSON string) (string, error) {
 	startDLCleanup()
 
 	var args struct {
@@ -200,15 +200,26 @@ func handleServeFileDownload(_ context.Context, argsJSON string) (string, error)
 		"expires_in":   int(ttl.Seconds()),
 	}
 
-	// 若文件是图片且位于 output 目录下，额外返回 webUrl（直接访问路径）。
+	// 若文件是图片，设置 webUrl 以触发 agent.go 的 WriteImage 自动投递。
+	// 若图片在 output 目录内：直接计算 web 路径。
+	// 若图片在 output 目录外（如 /tmp/）：按分桶规则移动到 output/<userID>/<bucket>/，再计算 web 路径。
 	// agent.go 的 extractWebURL 检测到 webUrl 后会自动调用 WriteImage，
 	// 将图片推送到当前渠道（web 内联 / 飞书原生图片消息等）。
 	if isImagePath(absPath) {
 		outputAbs, err2 := filepath.Abs(config.Cfg.OutputDir)
-		if err2 == nil && strings.HasPrefix(absPath, outputAbs) {
-			rel := strings.TrimPrefix(absPath, outputAbs)
-			rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
-			out["webUrl"] = "/" + config.Cfg.OutputDir + rel
+		if err2 == nil {
+			if !strings.HasPrefix(absPath, outputAbs) {
+				// 图片在 output 目录外，按分桶规则移动到 output/<userID>/<bucket>/
+				userID := userIDFromCtx(ctx)
+				if dest, moveErr := moveFileToOutputBucket(absPath, outputAbs, userID); moveErr == nil {
+					absPath = dest
+				}
+			}
+			if strings.HasPrefix(absPath, outputAbs) {
+				rel := strings.TrimPrefix(absPath, outputAbs)
+				rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+				out["webUrl"] = "/" + config.Cfg.OutputDir + rel
+			}
 		}
 	}
 
