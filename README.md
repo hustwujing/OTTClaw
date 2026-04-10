@@ -238,17 +238,17 @@ skills/
     references/   ← 参考资料（可选）
 ```
 
-`SKILL.md` 由两行 `==============================` 分隔为 HEAD（元数据）和 CONTENT（执行流程）：
+`SKILL.md` 使用标准 YAML Front Matter 格式，由 `---` 分隔为 HEAD（元数据）和 CONTENT（执行流程）：
 
 ```markdown
-==============================
+---
 skill_id: my_skill
 name: 数据分析技能
 display_name: 数据分析师
 enable: true
 description: 分析用户上传的数据文件，生成可视化报告
 trigger: 用户说"分析数据"、"帮我看看这份表格"时触发
-==============================
+---
 
 ## 执行流程
 

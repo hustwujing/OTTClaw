@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: bootstrap
 name: Initialization Wizard
 display_name: Setup Wizard
 enable: true
 description: Guide users through the initial configuration of OTTClaw: define the business role (ROLE.md), create required skills, and hot-reload to go live upon completion
 trigger: Automatically triggered on first system deployment; or when the user explicitly requests to reconfigure the system
-==============================
+---
 
 Three phases: Explore → Build ROLE.md + skills → Activate.
 

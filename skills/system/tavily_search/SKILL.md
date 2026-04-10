@@ -1,4 +1,4 @@
-==============================
+---
 skill_id: tavily_search
 name: Tavily Search
 display_name: 网络搜索
@@ -7,7 +7,7 @@ description: Web search via tvly CLI returning LLM-optimized results with snippe
 trigger: When the user wants to search the web, find articles, look up info, get recent news, or says "搜索", "查找", "最新的 X".
 requires_bins: tvly
 install_hint: curl -fsSL https://cli.tavily.com/install.sh | bash
-==============================
+---
 
 # Tavily Search
 

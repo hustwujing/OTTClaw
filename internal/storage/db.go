@@ -491,6 +491,18 @@ func UpsertUserNotes(userID, notes string) error {
 	return nil
 }
 
+const systemUserID = "__system__"
+
+// GetSystemNotes 读取系统级笔记（全局共享，不绑定用户）
+func GetSystemNotes() (string, error) {
+	return GetUserNotes(systemUserID)
+}
+
+// UpsertSystemNotes 覆写系统级笔记
+func UpsertSystemNotes(notes string) error {
+	return UpsertUserNotes(systemUserID, notes)
+}
+
 // ----- UserData CRUD -----
 
 // GetUserData 按 user_id + key 查询单条值，不存在时返回 ("", false, nil)

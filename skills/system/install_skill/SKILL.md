@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: install_skill
 name: Install Skill
 display_name: Skill Installer
 enable: true
 description: Installs skills from the open skills.sh ecosystem or from an uploaded skill package. Handles full-package install (SKILL.md + scripts + references + assets) with format conversion, platform adaptation, and hot-reload.
 trigger: When the user asks "find a skill for X", "is there a skill that can...", "install a skill", "can you do X" where X is a specialized capability, wants to extend agent capabilities, uploads a skill package, or wants to import/migrate a skill from another platform.
-==============================
+---
 
 ## Step 0: Determine Mode
 
@@ -45,7 +45,7 @@ skill(action=run_script, skill_id=install_skill, script_name=clone.py, args=["<o
 
 **4d. Rewrite for OTTClaw:**
 
-*SKILL.md*: two `==============================` separators. HEAD: `skill_id` (lowercase, hyphens→underscores, digits/letters/underscores only), `name`/`display_name` from original, `enable: true`, `description`/`trigger` derived. CONTENT: translated + trimmed (4e + 4f).
+*SKILL.md*: standard YAML Front Matter (`---` separators). HEAD: `skill_id` (lowercase, hyphens→underscores, digits/letters/underscores only), `name`/`display_name` from original, `enable: true`, `description`/`trigger` derived. CONTENT: translated + trimmed (4e + 4f).
 
 *Scripts* — rewrite each individually, never copy as-is. For any script language: replace hardcoded `/tmp/...` paths with the cross-platform isolated pattern:
 ```python
@@ -75,7 +75,7 @@ For Python: replace Linux-specific paths (`/proc`, `/etc/os-release`) and GNU su
 **4g. Verify then save to KV.**
 
 Before saving, verify the assembled SKILL.md:
-- Both separators are **exactly 30 `=` characters** — copy the literal string from the template read in 4a, never type from memory.
+- Both separators are **exactly `---`** — copy the literal string from the template read in 4a, never type from memory.
 - `skill_id`, `name`, `enable`, `display_name`, `description`, `trigger` fields are present and non-empty in HEAD.
 
 ```
@@ -97,7 +97,7 @@ List file names, then: `notify(action=confirm)` → "Confirm Install" / "Cancel"
 
 1. `kv(get, _install_skill_md)` → `notify(progress, "Writing SKILL.md...")`
 2. Pre-write: if `skill_template.md` not read in 4a, read it now.
-3. `skill(action=write, skill_id=..., content=...)` — omit `sub_path` for SKILL.md. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue (separator count must be exactly 30 `=`, missing HEAD fields, etc.) → `kv(set, _install_skill_md=<fixed content>)` → retry write immediately.
+3. `skill(action=write, skill_id=..., content=...)` — omit `sub_path` for SKILL.md. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue (YAML Front Matter `---` separators, missing HEAD fields, etc.) → `kv(set, _install_skill_md=<fixed content>)` → retry write immediately.
 4. If `_install_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="script/<name>")`.
 5. If `_install_references` non-empty: `notify(progress, "Writing references...")` → for each: `skill(write, sub_path="references/<name>")`.
 6. If `_install_assets` non-empty: `notify(progress, "Writing assets...")` → for each: `skill(write, sub_path="assets/<name>")`.
@@ -152,7 +152,7 @@ Map to OTTClaw layout:
 *Other files*: keep content exactly; use original relative path as `sub_path`.
 
 Verify then save to KV. Before saving, verify:
-- Both separators are **exactly 30 `=` characters** — copy from template, never type from memory.
+- Both separators are **exactly `---`** — copy from template, never type from memory.
 - `skill_id`, `name`, `enable`, `display_name`, `description`, `trigger` fields are present and non-empty in HEAD.
 
 ```

@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: unzip_file
 name: Unzip Assistant
 display_name: Unzip Assistant
 description: Accepts an archive file (zip/tar/tar.gz/rar/7z), extracts it to the output directory, returns the list of internal file paths, and stores it in KV
 trigger: Triggered when the user uploads an archive and says "help me unzip", "extract this file", "unzip this", "unpack this archive", etc.
 enable: true
-==============================
+---
 
 ## Steps
 

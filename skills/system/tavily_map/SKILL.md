@@ -1,4 +1,4 @@
-==============================
+---
 skill_id: tavily_map
 name: Tavily Map
 display_name: 站点 URL 发现
@@ -7,7 +7,7 @@ description: Discovers URLs on a website without extracting content. Faster than
 trigger: When the user wants to list URLs on a site, find a specific page, see site structure, or says "map the site", "list all pages", "站点地图".
 requires_bins: tvly
 install_hint: curl -fsSL https://cli.tavily.com/install.sh | bash
-==============================
+---
 
 # Tavily Map
 

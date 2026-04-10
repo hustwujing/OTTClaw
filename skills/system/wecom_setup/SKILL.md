@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: wecom_setup
 name: WeCom Bot Configuration Wizard
 display_name: WeCom Setup Assistant
 enable: true
 description: Guides users through configuring a WeCom group bot (Webhook mode), with support for test verification
 trigger: Triggered when the user says "configure WeCom", "set up WeCom", "WeCom configuration", "connect WeCom", or similar requests
-==============================
+---
 
 Webhook push-only; cannot receive messages.
 

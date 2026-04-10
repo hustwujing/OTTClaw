@@ -34,21 +34,24 @@ import (
 	"sync"
 )
 
-// Separator 技能文件中 HEAD 与 CONTENT 的标准分割线（30 个 '='）。
-// 写入时使用此标准格式；解析时放宽为 10 个以上连续 '=' 即可匹配。
-const Separator = "=============================="
+// Separator 技能文件中 HEAD 与 CONTENT 的标准分割线（YAML Front Matter）。
+// 写入时使用此标准格式。
+const Separator = "---"
 
-// separatorRe 匹配行首 10 个以上连续 '='（容忍 LLM 输出数量不精确）
+// yamlFrontMatterRe 匹配标准 YAML Front Matter：以 --- 开头，以 --- 结束。
+var yamlFrontMatterRe = regexp.MustCompile(`(?s)\A\s*---\s*\n(.*?\n)---\s*\n`)
+
+// separatorRe 匹配旧格式行首 10 个以上连续 '='（向后兼容）
 var separatorRe = regexp.MustCompile(`(?m)^={10,}\s*$`)
 
 // Head 技能头部信息（仅元数据，不含完整内容）
 type Head struct {
-	SkillID     string
-	Name        string
-	DisplayName string // 向用户展示的技能名称（优雅名字），未设置时回退到 Name
-	Description string
-	Trigger     string
-	Enable      bool // enable: true 时才加载；缺省或 false 时跳过
+	SkillID     string `yaml:"skill_id"`
+	Name        string `yaml:"name"`
+	DisplayName string `yaml:"display_name"` // 向用户展示的技能名称（优雅名字），未设置时回退到 Name
+	Description string `yaml:"description"`
+	Trigger     string `yaml:"trigger"`
+	Enable      bool   `yaml:"enable"` // enable: true 时才加载；缺省或 false 时跳过
 }
 
 // Skill 完整技能（HEAD + CONTENT + 根目录路径）
@@ -316,22 +319,39 @@ func (s *store) GetSkillDir(userID, skillID string) (string, bool) {
 // ParseContent 解析 SKILL.md 字符串内容，校验格式并返回 Skill（RootPath 留空）。
 // 供 write_skill_file 等工具在写入前做格式验证。
 //
+// 支持两种格式：
+//   - 标准 YAML Front Matter（--- 分隔）
+//   - 旧格式（====== 分隔），向后兼容
+//
 // 校验规则：
-//   - 存在两个分隔符（恰好 30 个 '='）
 //   - HEAD 中 skill_id 和 name 字段非空
-//   - CONTENT 区（第二分隔符之后）非空
+//   - CONTENT 区非空
 func ParseContent(content string) (*Skill, error) {
-	locs := separatorRe.FindAllStringIndex(content, 3)
-	if len(locs) < 2 {
-		return nil, fmt.Errorf("缺少分隔符（需要至少两行连续 10 个以上 '='）")
+	// 优先尝试 YAML Front Matter（--- 分隔）
+	if m := yamlFrontMatterRe.FindStringSubmatchIndex(content); m != nil {
+		headSection := strings.TrimSpace(content[m[2]:m[3]])
+		bodySection := strings.TrimSpace(content[m[1]:])
+
+		sk := &Skill{Content: bodySection}
+		sk.SkillID, sk.Name, sk.DisplayName, sk.Description, sk.Trigger, sk.Enable = parseHead(headSection)
+		return validateSkill(sk)
 	}
 
+	// fallback：旧格式（====== 分隔）
+	locs := separatorRe.FindAllStringIndex(content, 3)
+	if len(locs) < 2 {
+		return nil, fmt.Errorf("缺少分隔符（需要 YAML Front Matter '---' 或至少两行连续 10 个以上 '='）")
+	}
 	headSection := strings.TrimSpace(content[locs[0][1]:locs[1][0]])
 	bodySection := strings.TrimSpace(content[locs[1][1]:])
 
 	sk := &Skill{Content: bodySection}
 	sk.SkillID, sk.Name, sk.DisplayName, sk.Description, sk.Trigger, sk.Enable = parseHead(headSection)
+	return validateSkill(sk)
+}
 
+// validateSkill 校验 Skill 必填字段
+func validateSkill(sk *Skill) (*Skill, error) {
 	if sk.SkillID == "" {
 		return nil, fmt.Errorf("HEAD 中 skill_id 字段为空或缺失")
 	}
@@ -339,7 +359,7 @@ func ParseContent(content string) (*Skill, error) {
 		return nil, fmt.Errorf("HEAD 中 name 字段为空或缺失")
 	}
 	if sk.Content == "" {
-		return nil, fmt.Errorf("CONTENT 区（第二个分隔符之后）不能为空")
+		return nil, fmt.Errorf("CONTENT 区不能为空")
 	}
 	return sk, nil
 }

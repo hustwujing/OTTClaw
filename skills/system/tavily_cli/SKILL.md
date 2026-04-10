@@ -1,4 +1,4 @@
-==============================
+---
 skill_id: tavily_cli
 name: Tavily CLI
 display_name: 网络搜索与研究
@@ -7,7 +7,7 @@ description: Web search, content extraction, site crawling, URL discovery, and A
 trigger: When the user wants to search the web, extract URL content, crawl docs, discover site URLs, or conduct deep research with citations.
 requires_bins: tvly
 install_hint: curl -fsSL https://cli.tavily.com/install.sh | bash
-==============================
+---
 
 # Tavily CLI
 

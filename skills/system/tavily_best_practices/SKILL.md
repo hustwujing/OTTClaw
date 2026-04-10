@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: tavily_best_practices
 name: Tavily Best Practices
 display_name: Tavily 最佳实践
 enable: false
 description: Production-grade Tavily SDK reference for Python & JavaScript. Client init, method selection, quick examples, and links to detailed reference docs.
 trigger: When the user integrates Tavily SDK in code, builds RAG/agentic workflows, or asks "how to use Tavily in code", "Tavily SDK".
-==============================
+---
 
 # Tavily SDK Best Practices
 

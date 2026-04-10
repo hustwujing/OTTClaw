@@ -667,9 +667,14 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}
 			// 会话结束 memory flush：达到最少轮次后在后台提示 LLM 保存有价值的信息。
 			// hasFlushed 为 true 表示压缩前已做过同步 flush，此处跳过，避免重复触发。
+			// 特例：如果检测到工具失败→成功模式，无视轮次阈值直接 flush（子 Agent 场景）。
 			if config.Cfg.MemoryEnabled && !hasFlushed && config.Cfg.MemoryFlushMinTurns > 0 {
-				if userMsgCount, err := storage.CountUserMessages(sessionID); err == nil &&
-					int(userMsgCount) >= config.Cfg.MemoryFlushMinTurns {
+				hasLessons := detectToolLessons(messages) != ""
+				meetsMinTurns := false
+				if userMsgCount, err := storage.CountUserMessages(sessionID); err == nil {
+					meetsMinTurns = int(userMsgCount) >= config.Cfg.MemoryFlushMinTurns
+				}
+				if meetsMinTurns || hasLessons {
 					hasFlushed = true
 					a.bgWg.Add(1)
 					go func() {
@@ -1281,13 +1286,19 @@ user_id: %%s
 		var guidance strings.Builder
 		guidance.WriteString("\n\n# Agent Notes (persistent across sessions)\n")
 		guidance.WriteString(notesText)
+		// 系统级笔记（全局共享）
+		sysNotes, _ := storage.GetSystemNotes()
+		if sysNotes != "" {
+			guidance.WriteString("\n\n# System Notes (shared across all users — tool/env lessons)\n")
+			guidance.WriteString(sysNotes)
+		}
 		guidance.WriteString("\n\n# User Persona\n")
 		guidance.WriteString(snap.persona)
 		guidance.WriteString("\n\n# Memory Guidance\n")
 		if config.Cfg.HonchoEnabled {
 			guidance.WriteString("memory(target=notes): env/tool facts. memory(target=persona): user facts for next session. honcho_conclude: save conclusions. session_search: past session recall.\nhoncho_profile: only if Honcho Memory absent. honcho_search: user references past sessions. honcho_context: deep user reasoning, use sparingly.")
 		} else {
-			guidance.WriteString("memory(target=notes): env/tool facts, conventions. memory(target=persona): user preferences.")
+			guidance.WriteString("memory(target=notes): env/tool facts. memory(target=persona): user preferences. memory(target=system_notes): global tool/env lessons for all users.")
 			if config.Cfg.SessionSearchEnabled {
 				guidance.WriteString(" session_search: past session recall.")
 			}
@@ -2390,26 +2401,26 @@ If worth saving, call the skill tool:
 4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",        content=<data>)
 5. skill(action=reload)  — must call after all files are written
 
-The content field for SKILL.md must be this exact structure (the ====== separator lines are LITERAL — they must appear in the content string itself, not as visual decoration):
+The content field for SKILL.md must use standard YAML Front Matter (the --- lines are LITERAL — they must appear in the content string itself, not as visual decoration):
 
 ` + "```" + `
-==============================
+---
 skill_id: <snake_case_id>
 name: <SkillName>
 display_name: <中文展示名>
 description: <one-line, ≤30 words>
 trigger: <when to use, ≤30 words>
 enable: true
-==============================
+---
 <workflow: bullet points only, no prose, no redundant headings>
 ` + "```" + `
 
 Rules:
 - ALL fields in English except display_name
-- The content must start with a line of 30 '=' signs
-- There must be exactly two separator lines of 30 '=' signs
-- Everything between the two separators is the HEAD (key: value fields)
-- Everything after the second separator is the CONTENT (workflow)
+- The content must start with a line containing exactly '---'
+- There must be exactly two '---' lines forming the YAML Front Matter
+- Everything between the two '---' lines is the HEAD (YAML key: value fields)
+- Everything after the second '---' is the CONTENT (workflow)
 - Be concise — every word counts
 - **Sequential execution notice (mandatory)**: the CONTENT's execution steps section must always begin with this line before the first step:
   > Execute all steps strictly in order, one step at a time. Do not skip or merge steps. Wait for each step's result before proceeding to the next.
@@ -2585,7 +2596,7 @@ func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
 		var targetPath string
 		if args.SubPath == "" || strings.EqualFold(args.SubPath, "SKILL.md") {
 			if _, err := skill.ParseContent(args.Content); err != nil {
-				return fmt.Sprintf(`{"error":"SKILL.md format error: %v — content must follow this exact structure: line1=30 '=' signs, then HEAD key:value fields, then another line of 30 '=' signs, then workflow content. Example: \"==============================\nskill_id: my_skill\nname: MySkill\ndisplay_name: 我的技能\ndescription: What it does.\ntrigger: When to use it.\nenable: true\n==============================\n- Step 1: do X\n- Step 2: do Y\""}`, err)
+				return fmt.Sprintf(`{"error":"SKILL.md format error: %v — content must use YAML Front Matter. Example: \"---\nskill_id: my_skill\nname: MySkill\ndisplay_name: 我的技能\ndescription: What it does.\ntrigger: When to use it.\nenable: true\n---\n- Step 1: do X\n- Step 2: do Y\""}`, err)
 			}
 			if err := skill.ScanSkillFile(args.Content, ""); err != nil {
 				return fmt.Sprintf(`{"error":"security scan rejected SKILL.md: %v"}`, err)
@@ -2760,17 +2771,87 @@ func buildMemoryContextBlock(userID string) string {
 	} else {
 		sb.WriteString("  " + persona + "\n")
 	}
+
+	// system_notes（全局共享）
+	sysNotes, _ := storage.GetSystemNotes()
+	sb.WriteString("system_notes (shared across all users):\n")
+	if sysNotes == "" {
+		sb.WriteString("  (empty)\n")
+	} else {
+		sysEntries := strings.Split(sysNotes, "§")
+		n := 0
+		for _, e := range sysEntries {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				continue
+			}
+			n++
+			sb.WriteString(fmt.Sprintf("  %d. %s\n", n, e))
+		}
+		if n == 0 {
+			sb.WriteString("  (empty)\n")
+		}
+	}
+
 	return sb.String()
 }
 
-func buildFlushPrompt(userID string) string {
-	return "[System: Session ending.\n" + buildMemoryContextBlock(userID) +
-		"Use the available tools to save anything worth keeping — user preferences, corrections, env facts, notable conclusions. If nothing worth saving, skip.]"
+func buildFlushPrompt(userID string, messages []llm.ChatMessage) string {
+	lessons := detectToolLessons(messages)
+	var sb strings.Builder
+	sb.WriteString("[System: Session ending.\n")
+	sb.WriteString(buildMemoryContextBlock(userID))
+	sb.WriteString("Save worth-keeping info (preferences, corrections, env facts) via memory tool. Skip if nothing.\n")
+	sb.WriteString("Save tool/env lessons to system_notes: both single-tool failures and multi-step approach switches (e.g. approach A failed → switched to approach B). Near limit? Remove least useful first, then add.")
+	if lessons != "" {
+		sb.WriteString("\n\nTool failures detected (review full context for approach-level lessons too):\n")
+		sb.WriteString(lessons)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// detectToolLessons 扫描消息历史，检测工具调用中"失败→成功"的模式（含跨工具替代方案）。
+// 返回人类可读的摘要文本，供 flush prompt 显式提示 LLM 判断是否值得记录。
+func detectToolLessons(messages []llm.ChatMessage) string {
+	type toolResult struct {
+		name    string
+		content string
+		isErr   bool
+	}
+	var results []toolResult
+	for _, m := range messages {
+		if m.Role == "tool" && m.Name != "" {
+			isErr := strings.HasPrefix(m.Content, "ERROR:") ||
+				strings.Contains(m.Content, `"ok":false`) ||
+				strings.Contains(m.Content, `"error":`)
+			results = append(results, toolResult{name: m.Name, content: m.Content, isErr: isErr})
+		}
+	}
+
+	var lessons []string
+	seen := map[string]bool{}
+	for i := 1; i < len(results); i++ {
+		prev, cur := results[i-1], results[i]
+		if prev.isErr && !cur.isErr {
+			key := prev.name + "→" + cur.name + ": " + truncate(prev.content, 60)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if prev.name == cur.name {
+				lessons = append(lessons, fmt.Sprintf("- %s: FAILED(%s) → SUCCEEDED", prev.name, truncate(prev.content, 120)))
+			} else {
+				lessons = append(lessons, fmt.Sprintf("- %s FAILED(%s) → switched to %s → SUCCEEDED", prev.name, truncate(prev.content, 100), cur.name))
+			}
+		}
+	}
+	return strings.Join(lessons, "\n")
 }
 
 func buildReviewPrompt(userID string) string {
 	return "[System: Review the conversation.\n" + buildMemoryContextBlock(userID) +
-		"If you found user preferences, env facts, or stable conventions worth keeping, call the memory tool to save them. If nothing, reply SKIP.]"
+		`Save user preferences, env facts, conventions via memory tool. Remove outdated system_notes entries. Reply SKIP if nothing.]`
 }
 
 // flushSessionMemory 提示 LLM 保存本次会话中有价值的信息。
@@ -2780,7 +2861,7 @@ func buildReviewPrompt(userID string) string {
 // 不写 DB 对话历史，不影响正常会话上下文。
 func (a *Agent) flushSessionMemory(ctx context.Context, userID, sessionID string, messages []llm.ChatMessage) {
 	flushMessages := append(append([]llm.ChatMessage(nil), messages...),
-		llm.ChatMessage{Role: "user", Content: buildFlushPrompt(userID)})
+		llm.ChatMessage{Role: "user", Content: buildFlushPrompt(userID, messages)})
 
 	flushTools := []llm.Tool{tool.MemoryTool()}
 	if a.honchoClient != nil {

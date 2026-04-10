@@ -162,6 +162,7 @@ type AppConfig struct {
 	MemoryNotesCharLimit    int  // MEMORY_NOTES_CHAR_LIMIT：Agent notes 字符上限，默认 2200
 	MemoryPersonaCharLimit  int  // MEMORY_PERSONA_CHAR_LIMIT：用户人设字符上限，默认 1375
 	MemorySkillKVEntryLimit int  // MEMORY_SKILL_KV_ENTRY_LIMIT：user_kv 每用户最大条目数，默认 200
+	SystemNotesCharLimit    int  // SYSTEM_NOTES_CHAR_LIMIT：系统级笔记字符上限（全局共享），默认 1024
 
 	// 跨会话搜索
 	SessionSearchEnabled         bool // SESSION_SEARCH_ENABLED：是否启用 session_search 工具，默认 true
@@ -296,6 +297,7 @@ func loadConfig() *AppConfig {
 		MemoryNotesCharLimit:    getEnvInt("MEMORY_NOTES_CHAR_LIMIT", 2200),
 		MemoryPersonaCharLimit:  getEnvInt("MEMORY_PERSONA_CHAR_LIMIT", 1375),
 		MemorySkillKVEntryLimit: getEnvInt("MEMORY_SKILL_KV_ENTRY_LIMIT", 200),
+		SystemNotesCharLimit:    getEnvInt("SYSTEM_NOTES_CHAR_LIMIT", 1024),
 		SessionSearchEnabled:         getEnvBool("SESSION_SEARCH_ENABLED", true),
 		SessionSearchSummaryMaxChars: getEnvInt("SESSION_SEARCH_SUMMARY_MAX_CHARS", 50000),
 		HonchoEnabled:          getEnvBool("HONCHO_ENABLED", false),

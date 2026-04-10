@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: wecom_bot_setup
 name: WeCom AI Bot Configuration Wizard
 display_name: WeCom AI Bot Setup
 enable: true
 description: Guides users through binding a WeCom AI bot (Bot ID + Secret) for bidirectional long-connection messaging — receive and reply in real time
 trigger: Triggered when the user says "configure WeCom AI bot", "bind WeCom bot", "set up WeCom AI bot", "WeCom bot configuration", "企业微信 AI 机器人", or similar requests
-==============================
+---
 
 ## Overview
 

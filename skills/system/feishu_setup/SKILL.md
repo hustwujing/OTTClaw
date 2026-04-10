@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: feishu_setup
 name: Feishu Bot Configuration Wizard
 display_name: Feishu Setup Assistant
 enable: true
 description: Guides users through interactive configuration of a Feishu bot (Bot API long-connection mode or Webhook mode), with support for test verification
 trigger: Triggered when the user says "configure Feishu", "set up Feishu bot", "Feishu configuration", "connect Feishu", or similar requests
-==============================
+---
 
 ## Modes
 

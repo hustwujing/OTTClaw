@@ -1,4 +1,4 @@
-==============================
+---
 skill_id: tavily_crawl
 name: Tavily Crawl
 display_name: 站点批量爬取
@@ -7,7 +7,7 @@ description: Crawls websites and extracts content from multiple pages via tvly C
 trigger: When the user wants to crawl a site, download docs, bulk-extract pages, or says "crawl", "download the docs", "批量抓取", "爬取".
 requires_bins: tvly
 install_hint: curl -fsSL https://cli.tavily.com/install.sh | bash
-==============================
+---
 
 # Tavily Crawl
 

@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: mermaid_diagram
 name: Diagram & Chart Generator
 display_name: Diagram Designer
 enable: true
 description: Generates diagrams and data charts as PNG images. Uses Python matplotlib for data charts (line, bar, pie, temperature, trend, etc.) and Mermaid for structural diagrams (flowchart, sequence, ER, class, state, Gantt, etc.)
 trigger: When the user wants to draw a flowchart, sequence diagram, ER diagram, class diagram, state diagram, Gantt chart, line chart, bar chart, pie chart, temperature curve, trend chart, data chart, or says "draw me a diagram", "draw a chart", "generate an image", "plot the data", "visualize", etc.
-==============================
+---
 
 ## Step 1: Choose Engine
 

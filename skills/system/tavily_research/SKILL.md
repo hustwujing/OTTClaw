@@ -1,4 +1,4 @@
-==============================
+---
 skill_id: tavily_research
 name: Tavily Research
 display_name: AI 深度研究
@@ -7,7 +7,7 @@ description: AI-powered deep research via tvly CLI. Gathers sources, analyzes, a
 trigger: When the user needs deep research, comparisons, market analysis, literature review, or says "research", "调研", "深入分析", "对比分析".
 requires_bins: tvly
 install_hint: curl -fsSL https://cli.tavily.com/install.sh | bash
-==============================
+---
 
 # Tavily Research
 

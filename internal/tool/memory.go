@@ -90,10 +90,12 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 
 	switch args.Target {
 	case "notes", "persona":
+	case "system_notes":
+		return handleSystemNotes(ctx, userID, args.Action, args.Content, args.OldText)
 	case "user_kv":
 		return handleMemoryUserKV(ctx, userID, args.Action, args.Key, args.Content)
 	default:
-		return memoryError("unknown target: " + args.Target + " (valid: notes/persona/user_kv)"), nil
+		return memoryError("unknown target: " + args.Target + " (valid: notes/persona/system_notes/user_kv)"), nil
 	}
 
 	// notes / persona 校验
@@ -280,6 +282,103 @@ func handleMemory(ctx context.Context, argsJSON string) (string, error) {
 	return string(b), nil
 }
 
+// handleSystemNotes 处理 target=system_notes 的操作（get/add/replace/remove）
+// 系统级笔记，全局共享，所有用户可见。用于记录工具执行经验、环境踩坑等。
+func handleSystemNotes(ctx context.Context, userID, action, content, oldText string) (string, error) {
+	switch action {
+	case "get", "add", "replace", "remove":
+	default:
+		return memoryError("unknown action: " + action + " (valid for system_notes: get/add/replace/remove)"), nil
+	}
+	if (action == "add" || action == "replace") && content == "" {
+		return memoryError("content is required for action=" + action), nil
+	}
+	if (action == "replace" || action == "remove") && oldText == "" {
+		return memoryError("old_text is required for action=" + action), nil
+	}
+
+	current, err := storage.GetSystemNotes()
+	if err != nil {
+		return memoryError("read system_notes: " + err.Error()), nil
+	}
+	charLimit := config.Cfg.SystemNotesCharLimit
+
+	if action == "get" {
+		b, _ := json.Marshal(map[string]any{
+			"ok": true, "target": "system_notes",
+			"value": current, "chars_used": len([]rune(current)), "chars_limit": charLimit,
+		})
+		return string(b), nil
+	}
+
+	entries := splitNoteEntries(current)
+	switch action {
+	case "add":
+		const dupThreshold = 0.30
+		newRunes := []rune(strings.TrimSpace(content))
+		for _, e := range entries {
+			existRunes := []rune(strings.TrimSpace(e))
+			maxLen := len(newRunes)
+			if len(existRunes) > maxLen {
+				maxLen = len(existRunes)
+			}
+			if maxLen > 0 && float64(levenshtein(newRunes, existRunes))/float64(maxLen) <= dupThreshold {
+				b, _ := json.Marshal(map[string]any{
+					"ok": true, "target": "system_notes", "action": "add", "skipped": true,
+					"reason": "similar entry already exists", "chars_used": len([]rune(current)), "chars_limit": charLimit,
+				})
+				return string(b), nil
+			}
+		}
+		entries = append(entries, content)
+	case "replace":
+		found := false
+		for i, e := range entries {
+			if e == oldText {
+				entries[i] = content
+				found = true
+				break
+			}
+		}
+		if !found {
+			return memoryError("old_text not found in system_notes"), nil
+		}
+	case "remove":
+		newEntries := entries[:0]
+		found := false
+		for _, e := range entries {
+			if e == oldText {
+				found = true
+			} else {
+				newEntries = append(newEntries, e)
+			}
+		}
+		if !found {
+			return memoryError("old_text not found in system_notes"), nil
+		}
+		entries = newEntries
+	}
+
+	newValue := strings.Join(entries, "§")
+	chars := len([]rune(newValue))
+	if chars > charLimit {
+		return memoryError(fmt.Sprintf("system_notes limit reached (%d/%d chars), remove stale entries first", chars, charLimit)), nil
+	}
+	if action == "add" || action == "replace" {
+		if err := scanMemoryContent(content); err != nil {
+			return memoryError("content rejected by security scan: " + err.Error()), nil
+		}
+	}
+	if err := storage.UpsertSystemNotes(newValue); err != nil {
+		return memoryError("write system_notes: " + err.Error()), nil
+	}
+	logger.Debug("tool", userID, "", fmt.Sprintf("[memory] ✓ %s system_notes → %d/%d chars", action, chars, charLimit), 0)
+	b, _ := json.Marshal(map[string]any{
+		"ok": true, "target": "system_notes", "action": action, "chars_used": chars, "chars_limit": charLimit,
+	})
+	return string(b), nil
+}
+
 // handleMemoryUserKV 处理 target=user_kv 的操作（get/set/remove/list）
 // 用户维度的业务 KV，存储于 user_data 表，以 user_id + key 唯一定位，跨会话持久。
 // 有别于 session 维度的 kv（会话关闭即丢失）以及 notes/persona（Agent 内部知识）。
@@ -436,15 +535,16 @@ func MemoryTool() llm.Tool {
 		Function: llm.ToolFunction{
 			Name: "memory",
 			Description: `Cross-session persistence. Target:
-  notes   : agent scratchpad (env facts, quirks, conventions). §-separated. get/add/replace/remove
-  persona : user profile (name, role, style). get/add/replace/remove
-  user_kv : user-scoped business data that outlives sessions — not profile (→persona), not agent notes (→notes). get/set/remove/list
-Save: corrections, discoveries, preferences. Skip: temp state, task progress.`,
+  notes        : agent scratchpad (env facts, conventions). §-separated. get/add/replace/remove
+  persona      : user profile (name, role, style). get/add/replace/remove
+  system_notes : global tool/env lessons visible to ALL users. §-separated. get/add/replace/remove
+  user_kv      : user-scoped persistent business data. get/set/remove/list
+Save corrections, discoveries, preferences. Skip temp state.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"action":   map[string]any{"type": "string", "description": "notes/persona: get|add|replace|remove  user_kv: get|set|remove|list"},
-					"target":   map[string]any{"type": "string", "description": "notes | persona | user_kv"},
+					"action":   map[string]any{"type": "string", "description": "notes/persona/system_notes: get|add|replace|remove  user_kv: get|set|remove|list"},
+					"target":   map[string]any{"type": "string", "description": "notes | persona | system_notes | user_kv"},
 					"key":      map[string]any{"type": "string", "description": "user_kv: key name (letters/digits/_:.- max 200). Namespace to avoid collisions: \"feature:attr\""},
 					"content":  map[string]any{"type": "string", "description": "Required for add/replace/set"},
 					"old_text": map[string]any{"type": "string", "description": "Required for replace/remove (notes/persona)"},

@@ -1,11 +1,11 @@
-==============================
+---
 skill_id: skill_creator
 name: Skill Creator
 display_name: Skill Workshop
 enable: true
 description: Helps users design, create, or modify user skills (SKILL.md + optional scripts + optional reference files + optional assets) through interactive dialogue, with hot-reload — no service restart required
 trigger: When the user wants to create a new skill, add custom functionality, design a new workflow, extend system capabilities, or modify an existing user skill
-==============================
+---
 
 Design and write a complete skill package (SKILL.md + optional script/ + references/ + assets/), then hot-reload.
 
