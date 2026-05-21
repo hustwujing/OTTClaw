@@ -252,8 +252,8 @@ func New() *Executor {
 	e.register("kv", handleKv)         // 合并自 kv_get / kv_set / kv_append
 	e.register("update_role_md", handleUpdateRoleMD)
 	e.register("get_session_info", handleGetSessionInfo)
-	e.register("read_file", handleReadFile) // 合并自 read_file / read_pdf / read_image（按扩展名路由）
-	e.register("fs", handleFs)              // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
+	e.register("read_file", handleReadFile)         // 合并自 read_file / read_pdf / read_image（按扩展名路由）
+	e.register("fs", handleFs)                      // 合并自 fs_list / fs_stat / fs_read / fs_write / fs_delete / fs_move / fs_mkdir
 	e.register("tool_request", e.handleToolRequest) // 合并自 request_tool / list_tool_requests / close_tool_request
 	e.register("output_file", handleOutputFile)     // 合并自 write_output_file / serve_file_download
 	e.register("exec", handleExec)
@@ -372,12 +372,13 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"action":         map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_file", "write", "delete", "reload", "done"}},
-						"skill_id":       map[string]any{"type": "string"},
-						"script_name":    map[string]any{"type": "string"},
-						"sub_path":       map[string]any{"type": "string"},
-						"content":        map[string]any{"type": "string"},
-						"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"action":      map[string]any{"type": "string", "enum": []string{"load", "run_script", "read_file", "write", "delete", "reload", "done"}},
+						"skill_id":    map[string]any{"type": "string"},
+						"script_name": map[string]any{"type": "string"},
+						"sub_path":    map[string]any{"type": "string"},
+						"content":     map[string]any{"type": "string"},
+						"args":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"input_json":  map[string]any{"type": "string", "description": "JSON string piped to the script's stdin (for scripts that read json.load(sys.stdin))"},
 					},
 					"required": []string{"action"},
 				},
@@ -479,14 +480,19 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "exec",
-				Description: "Execute a shell command (bash -c). Use code_search for reading/searching source files; use code_search(action=git) for simple git lookups. Append \"; echo '[cmd:exit=$?]'\" to commands that produce no output. Call get_tool_doc(\"exec\") for advanced params.",
+				Description: "Execute a shell or Python script. Declare type explicitly. Safe scripts run immediately without confirmation; risky ones (shell escapes, file deletion, eval, etc.) prompt the user first — after approval call exec_run(pending_id). Call get_tool_doc(\"exec\") for full params.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"command": map[string]any{"type": "string"},
-						"workdir": map[string]any{"type": "string"},
+						"type": map[string]any{
+							"type": "string",
+							"enum": []string{"shell", "python"},
+						},
+						"code":     map[string]any{"type": "string", "description": "Script source code"},
+						"packages": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "pip packages to install before running (python only)"},
+						"workdir":  map[string]any{"type": "string"},
 					},
-					"required":             []string{"command"},
+					"required":             []string{"type", "code"},
 					"additionalProperties": true,
 				},
 			},
@@ -589,8 +595,20 @@ func (e *Executor) ToolDefinitions() []llm.Tool {
 				Name:        "browser",
 				Description: "Headless Chromium automation. Use snapshot to read page content (never screenshot for that). Call get_tool_doc(\"browser\") before use for full params and the login-handling protocol.",
 				Parameters: map[string]any{
-					"type":                 "object",
-					"properties":           map[string]any{},
+					"type": "object",
+					"properties": map[string]any{
+						"action": map[string]any{
+							"type": "string",
+							"enum": []string{
+								"launch", "close", "navigate", "snapshot", "screenshot",
+								"click", "type", "select", "scroll", "drag", "hover",
+								"press_key", "wait", "evaluate", "tabs", "tab_open",
+								"tab_close", "solve_slider_captcha", "render",
+								"save_cookies", "load_cookies", "list_cookies",
+							},
+						},
+					},
+					"required":             []string{"action"},
 					"additionalProperties": true,
 				},
 			},
@@ -1102,10 +1120,10 @@ func handleDoneSkill(ctx context.Context, _ string) (string, error) {
 	return "Skill execution completed. Active skill protection cleared.", nil
 }
 
-// handleRunScript 执行技能 script/ 目录下的脚本，返回合并后的标准输出
+// handleRunScript 执行技能 scripts/ 目录下的脚本，返回合并后的标准输出
 //
 // 安全约束：
-//   - 脚本路径严格限制在 {skill_root}/script/ 目录内，拒绝路径穿越
+//   - 脚本路径严格限制在 {skill_root}/scripts/ 目录内，拒绝路径穿越
 //   - 执行超时 60 秒
 //
 // 解释器选择（按扩展名）：
@@ -1119,6 +1137,7 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 		SkillID    string   `json:"skill_id"`
 		ScriptName string   `json:"script_name"`
 		Args       []string `json:"args"`
+		InputJSON  string   `json:"input_json"` // 非空时以 JSON 字符串形式写入脚本 stdin
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parse run_script args: %w", err)
@@ -1142,7 +1161,7 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 	}
 
 	// 构造并校验脚本绝对路径，防止路径穿越
-	scriptDir := filepath.Join(skillDir, "script")
+	scriptDir := filepath.Join(skillDir, "scripts")
 	scriptPath := filepath.Clean(filepath.Join(scriptDir, args.ScriptName))
 
 	absScriptDir, err := filepath.Abs(scriptDir)
@@ -1174,27 +1193,45 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 		cmdArgs = append([]string{absScriptPath}, args.Args...)
 	}
 
-	// 带超时的 context
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(config.Cfg.ToolScriptTimeoutSec)*time.Second)
+	// 带超时的 context（与 exec 工具统一，使用 ToolExecTimeoutSec）
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(config.Cfg.ToolExecTimeoutSec)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, cmdArgs[0], cmdArgs[1:]...)
 	// 工作目录设为项目根目录（skills/ 的父目录），使相对路径 uploads/、output/ 等可直接访问
 	cmd.Dir = filepath.Dir(skill.Store.GetBaseDir())
-	// 注入 session / user / skill 上下文
+
+	// 注入环境变量，与 exec 工具保持一致：
+	//   SKILL_SESSION_ID / SKILL_USER_ID / SKILL_DIR — skill 专属上下文
+	//   AGENT_TMP_DIR / TMPDIR / TMP / TEMP          — 用户级隔离临时目录
+	//     os.TempDir()/{userID} 跨平台兼容（Linux: /tmp/{uid}，macOS: /var/folders/.../{uid}）
+	//     覆盖 TMPDIR/TMP/TEMP 后，Python tempfile.gettempdir() 自动返回用户隔离路径
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		userID = "_shared"
+	}
+	agentTmpDir := filepath.Join(os.TempDir(), userID)
+	_ = os.MkdirAll(agentTmpDir, 0o755)
 	cmd.Env = append(os.Environ(),
 		"SKILL_SESSION_ID="+sessionIDFromCtx(ctx),
-		"SKILL_USER_ID="+userIDFromCtx(ctx),
-		"SKILL_DIR="+skillDir, // 技能根目录，脚本如需访问自身目录下的文件可用此变量
+		"SKILL_USER_ID="+userID,
+		"SKILL_DIR="+skillDir,
+		"AGENT_TMP_DIR="+agentTmpDir,
+		"TMPDIR="+agentTmpDir,
+		"TMP="+agentTmpDir,
+		"TEMP="+agentTmpDir,
 	)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if args.InputJSON != "" {
+		cmd.Stdin = strings.NewReader(args.InputJSON)
+	}
 
 	if err := cmd.Run(); err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("script timed out after %ds", config.Cfg.ToolScriptTimeoutSec)
+			return "", fmt.Errorf("script timed out after %ds", config.Cfg.ToolExecTimeoutSec)
 		}
 		errOut := strings.TrimSpace(stderr.String())
 		if errOut == "" {
@@ -1211,7 +1248,7 @@ func handleRunScript(ctx context.Context, argsJSON string) (string, error) {
 // 参数：
 //   - skill_id: 技能唯一标识
 //   - sub_path:  相对于技能根目录的路径，例如 "extras/config.yaml"、"data/schema.json"
-//     （如需读取 SKILL.md 本身，使用 action=load；script/assets/references 有各自专用 action）
+//     （如需读取 SKILL.md 本身，使用 action=load；scripts/assets/references 有各自专用 action）
 //
 // 安全约束：路径不得穿越出技能根目录
 func handleReadSkillFile(ctx context.Context, argsJSON string) (string, error) {
@@ -1441,7 +1478,7 @@ func resolveSkillBaseDir(userID string) string {
 //   - content: 文件内容
 //   - sub_path（可选）: 相对于技能根目录的路径：
 //   - 省略 → 写入 SKILL.md（默认行为）
-//   - "script/foo.sh"         → 写入 script/ 目录
+//   - "scripts/foo.sh"        → 写入 scripts/ 目录
 //   - "assets/bar.json"       → 写入 assets/ 目录
 //   - "references/baz.md"     → 写入 references/ 目录
 //   - "extras/config.yaml"    → 写入任意自定义子目录（如导入第三方技能包时的原始结构）

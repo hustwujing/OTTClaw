@@ -145,6 +145,54 @@ func RunCronJobNow(c *gin.Context) {
 	})
 }
 
+// DeleteCronHistory 处理 DELETE /api/cron/history/:history_id
+// 删除单条执行历史记录。
+func DeleteCronHistory(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	histID, err := strconv.ParseUint(c.Param("history_id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid history_id"})
+		return
+	}
+	if err := storage.DeleteCronRunHistoryByID(uint(histID), userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// GetCronJobs 处理 GET /api/cron/jobs
+// 列出当前用户的所有定时任务。
+func GetCronJobs(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	jobs, err := cronpkg.ListJobs(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load jobs failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"jobs": jobs})
+}
+
+// PatchCronJob 处理 PATCH /api/cron/:job_id
+// 支持更新 enabled 字段（启用/禁用任务）。
+func PatchCronJob(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	jobID := c.Param("job_id")
+
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must contain 'enabled' field"})
+		return
+	}
+	if err := cronpkg.UpdateJob(jobID, userID, map[string]any{"enabled": *body.Enabled}); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // DeleteCronJob 处理 DELETE /api/cron/:job_id
 // 永久删除定时任务（若 job 正在运行，先发送取消信号）。
 func DeleteCronJob(c *gin.Context) {

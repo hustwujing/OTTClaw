@@ -33,6 +33,24 @@
         "commit",
         "仓库"
       ]
+    },
+    {
+      "name": "tavily",
+      "description": "Tavily web search, extract, crawl, map and research",
+      "transport": "http",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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",
+      "keywords": [
+        "tavily",
+        "search",
+        "web",
+        "crawl",
+        "extract",
+        "research",
+        "map",
+        "搜索",
+        "爬取",
+        "检索"
+      ]
     }
   ]
 }

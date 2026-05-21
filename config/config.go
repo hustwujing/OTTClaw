@@ -127,8 +127,7 @@ type AppConfig struct {
 	BrowserHeadless     bool   // BROWSER_HEADLESS：是否无头模式，默认 true；开发调试时设为 false 可看到浏览器窗口
 
 	// 工具执行超时
-	ToolScriptTimeoutSec   int // TOOL_SCRIPT_TIMEOUT_SEC：run_script 工具脚本执行超时秒数，默认 60
-	ToolExecTimeoutSec     int // TOOL_EXEC_TIMEOUT_SEC：exec 工具默认总超时秒数，默认 1800（30 分钟）
+	ToolExecTimeoutSec     int // TOOL_EXEC_TIMEOUT_SEC：exec 和 run_script 工具超时秒数，默认 1800（30 分钟）
 	ToolExecYieldMs        int // TOOL_EXEC_YIELD_MS：exec 工具默认 yield 等待毫秒数，默认 10000
 	ToolWebFetchTimeoutSec int // TOOL_WEB_FETCH_TIMEOUT_SEC：web_fetch 工具 HTTP 请求超时秒数，默认 15
 	WeComWebhookTimeoutSec int // WECOM_WEBHOOK_TIMEOUT_SEC：企业微信 Webhook 请求超时秒数，默认 10
@@ -180,6 +179,16 @@ type AppConfig struct {
 
 	// 桌面控制
 	DesktopEnabled bool // DESKTOP_ENABLED：是否启用桌面控制工具（截图/鼠标/键盘），默认 false
+
+	// Langfuse 可观测性
+	LangfuseEnabled   bool   // LANGFUSE_ENABLED：是否启用 Langfuse 追踪，默认 false
+	LangfuseBaseURL   string // LANGFUSE_BASE_URL：Langfuse 实例地址，默认 http://localhost:3000
+	LangfusePublicKey string // LANGFUSE_PUBLIC_KEY：公钥（Basic Auth username）
+	LangfuseSecretKey string // LANGFUSE_SECRET_KEY：私钥（Basic Auth password）
+
+	// Langfuse Task Unit 评估
+	LangfuseScorerIdleMinutes int // LANGFUSE_SCORER_IDLE_MINUTES：会话静默超过此分钟数后触发评估（条件 A），默认 15
+	LangfuseScorerMaxWindow   int // LANGFUSE_SCORER_MAX_WINDOW：消息积压超过此条数时触发评估（条件 B），默认 20，0 禁用
 }
 
 // Cfg 全局配置单例，进程启动时初始化一次
@@ -278,7 +287,6 @@ func loadConfig() *AppConfig {
 		BrowserServerPort:       getEnv("BROWSER_SERVER_PORT", "9222"),
 		BrowserServerScript:     getEnv("BROWSER_SERVER_SCRIPT", "browser-server/server.js"),
 		BrowserHeadless:         getEnv("BROWSER_HEADLESS", "true") != "false",
-		ToolScriptTimeoutSec:    getEnvInt("TOOL_SCRIPT_TIMEOUT_SEC", 60),
 		ToolExecTimeoutSec:      getEnvInt("TOOL_EXEC_TIMEOUT_SEC", 1800),
 		ToolExecYieldMs:         getEnvInt("TOOL_EXEC_YIELD_MS", 10_000),
 		ToolWebFetchTimeoutSec:  getEnvInt("TOOL_WEB_FETCH_TIMEOUT_SEC", 15),
@@ -307,6 +315,12 @@ func loadConfig() *AppConfig {
 		SubTaskRetentionDays:   getEnvInt("SUBTASK_RETENTION_DAYS", 7),
 		HonchoAppName:          getEnv("HONCHO_APP_NAME", "ottclaw"),
 		DesktopEnabled:         getEnvBool("DESKTOP_ENABLED", false),
+		LangfuseEnabled:        getEnvBool("LANGFUSE_ENABLED", false),
+		LangfuseBaseURL:        getEnv("LANGFUSE_BASE_URL", "http://localhost:3000"),
+		LangfusePublicKey:      getEnv("LANGFUSE_PUBLIC_KEY", ""),
+		LangfuseSecretKey:      getEnv("LANGFUSE_SECRET_KEY", ""),
+		LangfuseScorerIdleMinutes: getEnvInt("LANGFUSE_SCORER_IDLE_MINUTES", 15),
+		LangfuseScorerMaxWindow:   getEnvInt("LANGFUSE_SCORER_MAX_WINDOW", 20),
 	}
 	cfg.LLMEndpoints = loadLLMEndpoints(cfg.LLMProvider, cfg.LLMMaxTokens, cfg.LLMRateLimit)
 	return cfg

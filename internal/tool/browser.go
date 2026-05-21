@@ -24,6 +24,25 @@ import (
 	"OTTClaw/internal/browser"
 )
 
+// needsLoginHint 检测页面是否为登录/鉴权墙，是则返回提示文本，否则返回空字符串。
+// 检测依据：HTTP 401 或页面标题含常见登录提示词。
+func needsLoginHint(title string, httpStatus *int) string {
+	if httpStatus != nil && *httpStatus == 401 {
+		return fmt.Sprintf("页面返回 HTTP 401，需要登录后访问。请按 Login/verification 流程处理，不要重试 navigate。")
+	}
+	t := strings.ToLower(title)
+	for _, kw := range []string{
+		"需要登录", "请登录", "登录 - ", "- 登录", "login required",
+		"sign in", "log in", "please log", "please sign",
+		"未登录", "用户登录", "账号登录",
+	} {
+		if strings.Contains(t, kw) {
+			return "页面标题（\"" + title + "\"）显示需要登录。请按 Login/verification 流程处理，不要重试 navigate。"
+		}
+	}
+	return ""
+}
+
 // browserBlockedHint 检测页面是否疑似被反爬/WAF 拦截，是则返回提示文本，否则返回空字符串。
 // 检测依据：HTTP 状态码（403/429/503）或页面标题含 Cloudflare/WAF 常见特征词。
 func browserBlockedHint(title string, httpStatus *int) string {
@@ -61,6 +80,7 @@ type browserArgs struct {
 	DeltaY         float64  `json:"deltaY,omitempty"`
 	FullPage       bool     `json:"fullPage,omitempty"`
 	CookieName     string   `json:"cookieName,omitempty"`
+	URLs           []string `json:"urls,omitempty"`
 	SliderSelector string   `json:"sliderSelector,omitempty"`
 	TargetIdx      int      `json:"targetIdx,omitempty"`
 	TimeoutMs      int      `json:"timeoutMs,omitempty"`
@@ -90,7 +110,9 @@ func handleBrowser(ctx context.Context, argsJSON string) (string, error) {
 	}
 
 	if !browser.Default.IsRunning() {
-		return "", fmt.Errorf("browser: server is not running. Please contact administrator.")
+		if err := browser.Default.Start(); err != nil {
+			return "", fmt.Errorf("browser: server is not running and failed to restart: %w", err)
+		}
 	}
 
 	c := browser.NewClient(userID, ctx)
@@ -139,7 +161,9 @@ func dispatchBrowserAction(c *browser.Client, args browserArgs) (string, error) 
 			"title":      result.Title,
 			"httpStatus": result.HTTPStatus,
 		}
-		if hint := browserBlockedHint(result.Title, result.HTTPStatus); hint != "" {
+		if hint := needsLoginHint(result.Title, result.HTTPStatus); hint != "" {
+			out["needsLogin"] = hint
+		} else if hint := browserBlockedHint(result.Title, result.HTTPStatus); hint != "" {
 			out["antiBot"] = hint
 		}
 		return jsonStr(out)
@@ -155,7 +179,9 @@ func dispatchBrowserAction(c *browser.Client, args browserArgs) (string, error) 
 			"snapshot": result.Snapshot,
 			"refCount": result.RefCount,
 		}
-		if hint := browserBlockedHint(result.Title, nil); hint != "" {
+		if hint := needsLoginHint(result.Title, nil); hint != "" {
+			out["needsLogin"] = hint
+		} else if hint := browserBlockedHint(result.Title, nil); hint != "" {
 			out["antiBot"] = hint
 		}
 		return jsonStr(out)
@@ -293,7 +319,7 @@ func dispatchBrowserAction(c *browser.Client, args browserArgs) (string, error) 
 		if args.CookieName == "" {
 			return "", fmt.Errorf("browser save_cookies: cookieName is required")
 		}
-		result, err := c.Act(browser.ActRequest{Action: "save_cookies", CookieName: args.CookieName})
+		result, err := c.Act(browser.ActRequest{Action: "save_cookies", CookieName: args.CookieName, URLs: args.URLs})
 		if err != nil {
 			return "", err
 		}

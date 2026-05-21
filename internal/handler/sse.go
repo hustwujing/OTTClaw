@@ -90,7 +90,10 @@ func SSE(c *gin.Context) {
 			done <- spawnErr
 			return
 		}
-		done <- agent.Get().Run(agentCtx, userID, sessionID, req.Message, writer)
+		runErr := agent.Get().Run(agentCtx, userID, sessionID, req.Message, writer)
+		// 条件 B：消息积压检查（仅主 session，非子 agent；异步，不阻塞响应返回）
+		go agent.Get().MaybeScoreSession(sessionID, userID)
+		done <- runErr
 	}()
 
 	ticker := time.NewTicker(25 * time.Second)

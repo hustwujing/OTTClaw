@@ -7,7 +7,7 @@ description: Helps users design, create, or modify user skills (SKILL.md + optio
 trigger: When the user wants to create a new skill, add custom functionality, design a new workflow, extend system capabilities, or modify an existing user skill
 ---
 
-Design and write a complete skill package (SKILL.md + optional script/ + references/ + assets/), then hot-reload.
+Design and write a complete skill package (SKILL.md + optional scripts/ + references/ + assets/), then hot-reload.
 
 ---
 
@@ -33,7 +33,7 @@ Design and write a complete skill package (SKILL.md + optional script/ + referen
    kv(set, _draft_skill_md=<SKILL.md content>)
    kv(set, _skill_id=<skill_id>)
    ```
-3. Read all listed sub-files: `skill(action=read_file, sub_path="script/<name>")` / `references/<name>` / `assets/<name>`.
+3. Read all listed sub-files: `skill(action=read_file, sub_path="scripts/<name>")` / `references/<name>` / `assets/<name>`.
 4. Pre-populate KV: `_draft_scripts`, `_draft_references`, `_draft_assets` ([] if none).
 5. Show name, description, trigger, file inventory. Ask what to change.
 6. Route: metadata → Step One then Step Four; scripts → Step Two; references/assets → Step Three; workflow/comprehensive → Step Four.
@@ -140,7 +140,7 @@ On "Go Back and Edit": return to Step Four, re-save KV, call confirm again.
 1. `kv(get, _draft_skill_md)` → `notify(progress, "Writing SKILL.md...")`
 2. Pre-write: if `skill_template.md` not read in Step Zero, read it now.
 3. `skill(action=write, skill_id=..., content=...)` — validates format automatically. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue reported (separator count, missing field, etc.) → `kv(set, _draft_skill_md=<fixed content>)` → retry write immediately. Return to Step Four only on repeated failure. Writes to `skills/users/<userid>/<skill_id>/` (`skills/system/` is read-only).
-4. If `_draft_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="script/<name>")`.
+4. If `_draft_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="scripts/<name>")`.
 5. If `_draft_references` non-empty: `notify(progress, "Writing references...")` → for each: `skill(write, sub_path="references/<name>")`.
 6. If `_draft_assets` non-empty: `notify(progress, "Writing assets...")` → for each: `skill(write, sub_path="assets/<name>")`.
 7. `notify(progress, "Hot-reloading...")` → `skill(action=reload)`.

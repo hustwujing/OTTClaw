@@ -3,10 +3,10 @@
 // Date:      2026
 // Copyright: Copyright (c) 2026 Vijay
 
-// internal/mcp/http.go — MCP Streamable HTTP transport 实现 (v1: 非流式 JSON)
+// internal/mcp/http.go — MCP Streamable HTTP transport 实现
 //
 // 向配置的 url 发 HTTP POST，Content-Type: application/json。
-// v1 只处理非流式 JSON 响应（不支持 SSE 流）。
+// 支持 plain JSON 和 SSE (Server-Sent Events / Streamable HTTP) 两种响应格式。
 package mcp
 
 import (
@@ -15,7 +15,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -104,12 +106,59 @@ func (c *httpClient) sendRecv(ctx context.Context, method string, params any) (m
 		return nil, fmt.Errorf("mcp http: read response: %w", err)
 	}
 
+	// Detect and parse SSE (Streamable HTTP) responses
+	if isSSE(resp, respBody) {
+		return parseSSE(respBody)
+	}
+
 	var rpcResp rpcResponse
 	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("mcp http: parse response: %w", err)
+		return nil, fmt.Errorf("mcp http: parse response: %w\nraw: %s", err, truncate(string(respBody), 500))
 	}
 	if rpcResp.Error != nil {
 		return nil, fmt.Errorf("mcp http rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	return rpcResp.Result, nil
+}
+
+// isSSE checks whether the HTTP response uses Server-Sent Events (Streamable HTTP transport)
+func isSSE(resp *http.Response, body []byte) bool {
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		mt, _, _ := mime.ParseMediaType(ct)
+		if mt == "text/event-stream" {
+			return true
+		}
+	}
+	return strings.HasPrefix(string(bytes.TrimSpace(body)), "event:")
+}
+
+// parseSSE extracts the JSON-RPC result from an SSE stream.
+// Assumes a single event:message block containing a JSON-RPC response.
+func parseSSE(body []byte) (map[string]any, error) {
+	var dataBuf strings.Builder
+	lines := strings.Split(string(body), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "data:") {
+			dataBuf.WriteString(strings.TrimPrefix(line, "data:"))
+		}
+	}
+	if dataBuf.Len() == 0 {
+		return nil, fmt.Errorf("mcp http: SSE response has no data field")
+	}
+	var rpcResp rpcResponse
+	if err := json.Unmarshal([]byte(dataBuf.String()), &rpcResp); err != nil {
+		return nil, fmt.Errorf("mcp http: parse SSE data: %w\nraw: %s", err, truncate(dataBuf.String(), 500))
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("mcp http rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	return rpcResp.Result, nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

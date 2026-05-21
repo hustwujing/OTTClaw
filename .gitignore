@@ -4,6 +4,7 @@
 # 编译产物（保留空目录）
 bin/*
 !bin/.gitkeep
+/migrate-scorer
 
 # 运行时数据（保留空目录）
 data/*

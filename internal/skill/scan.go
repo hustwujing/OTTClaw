@@ -7,7 +7,7 @@
 // 拦截三类风险：
 //  1. 不可见/零宽 Unicode 字符（所有文件）
 //  2. Prompt injection 短语（SKILL.md 及 .md 文件）
-//  3. 危险命令模式：反弹 Shell / 管道执行 / base64+exec（script/ 文件）
+//  3. 危险命令模式：反弹 Shell / 管道执行 / base64+exec（scripts/ 文件）
 package skill
 
 import (
@@ -18,13 +18,13 @@ import (
 )
 
 // ScanSkillFile 在写入技能文件前做安全检查。
-// subPath 为空或 "SKILL.md" 时视为 SKILL.md；以 "script/" 开头时视为脚本文件。
+// subPath 为空或 "SKILL.md" 时视为 SKILL.md；以 "scripts/" 开头时视为脚本文件。
 // 返回非 nil 表示内容可疑，调用方应拒绝写入并将错误原因返回给调用者。
 func ScanSkillFile(content, subPath string) error {
 	normPath := strings.ToLower(strings.TrimSpace(subPath))
 	isSkillMD := normPath == "" || normPath == "skill.md"
 	isMarkdown := isSkillMD || strings.HasSuffix(normPath, ".md")
-	isScript := strings.HasPrefix(normPath, "script/")
+	isScript := strings.HasPrefix(normPath, "scripts/")
 
 	// ---- 1. 不可见 Unicode 字符（所有文件）----
 	if err := scanInvisibleUnicode(content); err != nil {
@@ -38,7 +38,7 @@ func ScanSkillFile(content, subPath string) error {
 		}
 	}
 
-	// ---- 3. 危险命令模式（script/ 文件）----
+	// ---- 3. 危险命令模式（scripts/ 文件）----
 	if isScript {
 		if err := scanDangerousCommands(content); err != nil {
 			return err

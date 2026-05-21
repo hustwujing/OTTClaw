@@ -57,6 +57,7 @@ type ActRequest struct {
 	DeltaY         float64  `json:"deltaY,omitempty"`
 	FullPage       bool     `json:"fullPage,omitempty"`
 	CookieName     string   `json:"cookieName,omitempty"`
+	URLs           []string `json:"urls,omitempty"`
 	SliderSelector string   `json:"sliderSelector,omitempty"`
 	TimeoutMs      int      `json:"timeoutMs,omitempty"`
 }

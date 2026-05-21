@@ -724,12 +724,14 @@ app.post('/act', async (req, res) => {
         return res.json({ status: 'ok', result });
       }
       case 'save_cookies': {
-        const { cookieName } = req.body;
+        const { cookieName, urls } = req.body;
         if (!cookieName) return res.status(400).json({ error: 'cookieName is required' });
         const safeName = cookieName.replace(/[^a-zA-Z0-9_-]/g, '_');
         const dir = path.join(OUTPUT_DIR, 'browser-cookies', req.userId);
         fs.mkdirSync(dir, { recursive: true });
-        const cookies = await u.context.cookies();
+        // urls 参数：限定只保存指定域名的 cookie，避免把所有站点的 cookie 全部混存
+        const filterUrls = Array.isArray(urls) ? urls : (urls ? [urls] : []);
+        const cookies = await u.context.cookies(filterUrls.length ? filterUrls : undefined);
         const filePath = path.join(dir, `${safeName}.json`);
         fs.writeFileSync(filePath, JSON.stringify(cookies, null, 2));
         return res.json({ status: 'ok', profile: safeName, saved: cookies.length });
@@ -1071,6 +1073,13 @@ async function shutdown() {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[browser-server] Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[browser-server] Uncaught exception:', err);
+});
 
 main().catch(err => {
   console.error('[browser-server] Fatal error:', err);

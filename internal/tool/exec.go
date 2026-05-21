@@ -44,9 +44,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -114,6 +114,7 @@ type execPending struct {
 	yieldMs    int
 	background bool
 	createdAt  time.Time
+	tmpFile    string // Python 脚本临时文件，执行后由 Go goroutine 清理（跨平台）
 }
 
 var pendingStore = struct {
@@ -232,11 +233,14 @@ func newExecID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 
-// ── handleExec：创建 pending，向前端推送审批确认框 ────────────────────────────
+// ── handleExec：安全分析 → 直接执行（safe）或推送确认框（risky）────────────────
 
 func handleExec(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Command    string            `json:"command"`
+		Type       string            `json:"type"`    // "python" | "shell"（默认 "shell"）
+		Code       string            `json:"code"`    // 脚本源码（统一字段）
+		Command    string            `json:"command"` // 兼容旧调用：等价于 type=shell + code
+		Packages   []string          `json:"packages"` // python 专用：pip install 包列表
 		Workdir    string            `json:"workdir"`
 		Env        map[string]string `json:"env"`
 		TimeoutSec int               `json:"timeout_sec"`
@@ -246,8 +250,23 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parse exec args: %w", err)
 	}
-	if strings.TrimSpace(args.Command) == "" {
-		return "", fmt.Errorf("command is required")
+
+	// code 优先；旧的 command 字段作为 shell 模式的兼容入口
+	code := args.Code
+	if code == "" {
+		code = args.Command
+	}
+	if strings.TrimSpace(code) == "" {
+		return "", fmt.Errorf("code is required")
+	}
+
+	// 默认 shell
+	scriptType := strings.ToLower(strings.TrimSpace(args.Type))
+	if scriptType == "" {
+		scriptType = "shell"
+	}
+	if scriptType != "python" && scriptType != "shell" {
+		return "", fmt.Errorf("type must be 'python' or 'shell', got %q", args.Type)
 	}
 
 	workdir := args.Workdir
@@ -255,33 +274,80 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 		workdir = "."
 	}
 
+	// ── 构造最终可执行命令 ────────────────────────────────────────────────────
+	var command string
+	var risks []string
+	var pyTmpFile string // Python 临时脚本路径，执行后由 goroutine 清理
+
+	switch scriptType {
+	case "python":
+		// 写临时 .py 文件；清理由 runExecCommand 中的 goroutine 负责，跨平台兼容（不依赖 shell rm）
+		tmpFile, err := os.CreateTemp("", "agent_py_*.py")
+		if err != nil {
+			return "", fmt.Errorf("create temp python file: %w", err)
+		}
+		pyTmpFile = tmpFile.Name()
+		if _, err := tmpFile.WriteString(code); err != nil {
+			tmpFile.Close()
+			os.Remove(pyTmpFile)
+			return "", fmt.Errorf("write python code: %w", err)
+		}
+		tmpFile.Close()
+
+		var parts []string
+		if len(args.Packages) > 0 {
+			parts = append(parts, fmt.Sprintf("pip install -q %s", strings.Join(args.Packages, " ")))
+		}
+		parts = append(parts, python3Bin()+" "+pyTmpFile)
+		command = strings.Join(parts, " && ")
+
+		risks = analyzePythonAST(code)
+
+	case "shell":
+		command = code
+		risks = analyzeShellAST(code)
+	}
+
 	pending := &execPending{
 		id:         newExecID("ep_"),
-		command:    args.Command,
+		command:    command,
 		workdir:    workdir,
 		env:        args.Env,
 		timeoutSec: args.TimeoutSec,
 		yieldMs:    args.YieldMs,
 		background: args.Background,
 		createdAt:  time.Now(),
+		tmpFile:    pyTmpFile,
 	}
 
-	// 子 agent 后台无人值守，或渠道不支持交互式确认框（微信/飞书等），直接执行。
-	// 安全性：用户在 spawn_subagent 时已授权子 agent 执行，微信/飞书等渠道无法弹确认框。
+	// 子 agent 或渠道层自动审批 → 跳过安全检测，直接执行
 	if taskIDFromCtx(ctx) > 0 || channel.ExecAutoApproveFromCtx(ctx) {
 		return runExecCommand(ctx, pending)
 	}
 
+	// 无风险 → 直接执行，无需用户确认
+	if len(risks) == 0 {
+		return runExecCommand(ctx, pending)
+	}
+
+	// 存在风险 → 写入 pendingStore，推确认框
 	pendingStore.mu.Lock()
 	pendingStore.data[pending.id] = pending
 	pendingStore.mu.Unlock()
 
-	// 通过 InteractiveSender 向前端推送确认框
 	sender := interactiveSenderFromCtx(ctx)
 	if sender != nil {
-		msg := fmt.Sprintf("即将执行以下命令：\n```\n%s\n```", args.Command)
+		preview := code
+		if len(preview) > 400 {
+			preview = preview[:400] + "\n... (truncated)"
+		}
+		lang := scriptType
+		msg := fmt.Sprintf(
+			"脚本含以下风险操作，请确认是否执行：\n\n**风险项**：\n- %s\n\n```%s\n%s\n```",
+			strings.Join(risks, "\n- "), lang, preview,
+		)
 		if workdir != "." {
-			msg += fmt.Sprintf("\n工作目录：`%s`", workdir)
+			msg += fmt.Sprintf("\n\n工作目录：`%s`", workdir)
 		}
 		_ = sender("confirm", map[string]any{
 			"message":       msg,
@@ -291,21 +357,21 @@ func handleExec(ctx context.Context, argsJSON string) (string, error) {
 		})
 	}
 
-	// 使用具名结构体而非 map，确保 JSON 字段顺序固定：
-	// status 和 pending_id 必须排在 command（可能非常长）之前，
-	// 否则 DB 截断（TOOL_RESULT_MAX_DB_BYTES）会在 pending_id 出现之前截断内容，
-	// 导致下轮对话中 LLM 无法读取 pending_id 并产生幻觉。
+	// status 和 pending_id 必须排在 code（可能非常长）之前，
+	// 否则 DB 截断会在 pending_id 出现之前截断，导致 LLM 无法读取 pending_id。
 	type pendingApprovalResult struct {
-		Status    string `json:"status"`
-		PendingID string `json:"pending_id"`
-		Command   string `json:"command"`
-		Hint      string `json:"hint"`
+		Status    string   `json:"status"`
+		PendingID string   `json:"pending_id"`
+		Risks     []string `json:"risks"`
+		Code      string   `json:"code"`
+		Hint      string   `json:"hint"`
 	}
 	b, _ := json.Marshal(pendingApprovalResult{
 		Status:    "pending_approval",
 		PendingID: pending.id,
-		Command:   args.Command,
-		Hint:      "Command is awaiting user approval. Stop and wait. After user confirms, call exec_run(pending_id) to execute. If user cancels, do not call exec_run.",
+		Risks:     risks,
+		Code:      code,
+		Hint:      "Script has risky operations. Awaiting user approval. Stop and wait. After user confirms, call exec_run(pending_id) to execute. If user cancels, do not call exec_run.",
 	})
 	return string(b), nil
 }
@@ -362,8 +428,14 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 	}
 
 	// 启动前创建 session 级隔离输出目录（user + session 双隔离）
-	// 路径含随机 session ID，不同用户、不同会话互不可见
-	outputDir := filepath.Join(os.TempDir(), "agent_out_"+sess.id)
+	// 放在 output/<userID>/ 下而非 /tmp，确保 $AGENT_OUTPUT_DIR 名副其实，
+	// LLM 自然在此目录中工作，避免绕过 staging 直接写 output/ 触发兜底扫描。
+	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
+	uid := userIDFromCtx(ctx)
+	if uid == "" {
+		uid = "_shared"
+	}
+	outputDir := filepath.Join(outputAbs, uid, "_session_"+sess.id)
 	if err := os.MkdirAll(outputDir, 0o755); err == nil {
 		sess.outputDir = outputDir
 	}
@@ -379,20 +451,36 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 	execRegistry.sessions[sess.id] = sess
 	execRegistry.mu.Unlock()
 
+	// Python 临时脚本：进程退出后由 goroutine 清理（跨平台，不依赖 shell rm -f）
+	if p.tmpFile != "" {
+		tmpToClean := p.tmpFile
+		go func() {
+			<-sess.doneCh
+			os.Remove(tmpToClean)
+		}()
+	}
+
 	// 子进程使用独立 context（不依赖 agent ctx，后台进程不受中止影响）
 	cmdCtx, cancelCmd := context.WithTimeout(context.Background(), timeoutDur)
 
-	cmd := exec.CommandContext(cmdCtx, "bash", "-c", p.command)
+	// 平台适配：Unix 用 bash -c，Windows 用 cmd /C
+	shellExe, shellArgv := shellArgs(p.command)
+	cmd := exec.CommandContext(cmdCtx, shellExe, shellArgv...)
 	cmd.Dir = p.workdir
 
-	// 覆盖 context 超时时的 kill 行为：杀进程组而非仅杀 bash
-	// pty.StartWithSize 会设置 Setsid=true，新会话的 PGID == bash PID，
-	// 所以 kill(-pgid, SIGKILL) 可清理 bash 及其所有子进程。
+	// 覆盖 context 超时时的 kill 行为：
+	// Unix — 杀进程组（pty.StartWithSize 设置 Setsid=true，PGID == shell PID）
+	// Windows — 直接 Kill 进程（exec_windows.go 实现）
 	cmd.Cancel = func() error {
 		return killGroup(cmd)
 	}
 
-	// 始终注入 AGENT_OUTPUT_DIR 和 AGENT_REGISTER_FILE（无论 p.env 是否为空）
+	// 始终注入 AGENT_OUTPUT_DIR、AGENT_REGISTER_FILE、AGENT_TMP_DIR、TMPDIR
+	// （无论 p.env 是否为空）
+	//
+	// AGENT_TMP_DIR / TMPDIR 使用 os.TempDir()/{userID} 构造，跨平台兼容：
+	//   Linux/macOS → /tmp/{userID}
+	//   Windows     → %LOCALAPPDATA%\Temp\{userID}（os.TempDir() 自动返回正确路径）
 	env := os.Environ()
 	if sess.outputDir != "" {
 		env = append(env, "AGENT_OUTPUT_DIR="+sess.outputDir)
@@ -400,6 +488,16 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 	if sess.regFile != "" {
 		env = append(env, "AGENT_REGISTER_FILE="+sess.regFile)
 	}
+	userID := userIDFromCtx(ctx)
+	if userID == "" {
+		userID = "_shared"
+	}
+	agentTmpDir := filepath.Join(os.TempDir(), userID)
+	_ = os.MkdirAll(agentTmpDir, 0o755)
+	env = append(env, "AGENT_TMP_DIR="+agentTmpDir)
+	env = append(env, "TMPDIR="+agentTmpDir) // Unix: Python tempfile / mktemp 原生尊重此变量
+	env = append(env, "TMP="+agentTmpDir)    // Windows: Python tempfile 读 TMP/TEMP
+	env = append(env, "TEMP="+agentTmpDir)   // Windows: 同上
 	for k, v := range p.env {
 		env = append(env, k+"="+v)
 	}
@@ -497,15 +595,30 @@ func runExecCommand(ctx context.Context, p *execPending) (string, error) {
 
 // ── 内部帮助函数 ──────────────────────────────────────────────────────────────
 
-// killGroup 向 cmd 所在的进程组发送 SIGKILL，清理 bash 及其所有子进程。
-// pty.StartWithSize 设置 Setsid=true，使 bash 成为新会话/进程组的组长，
-// PGID == bash PID，用负数 PID 即可寻址整组。
-func killGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
+// shellArgs 返回当前平台的 shell 可执行文件及参数。
+// Unix  → bash -c <script>
+// Windows → cmd /C <script>
+func shellArgs(script string) (exe string, args []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/C", script}
 	}
-	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	return "bash", []string{"-c", script}
 }
+
+// python3Bin 返回当前平台的 Python 解释器名称。
+// Unix    → python3
+// Windows → python3（若存在），否则 python
+func python3Bin() string {
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("python3"); err == nil {
+			return "python3"
+		}
+		return "python"
+	}
+	return "python3"
+}
+
+// killGroup 的平台实现见 exec_unix.go（!windows）和 exec_windows.go（windows）。
 
 func execDoneResult(sess *execSession, userID string) string {
 	elapsed := int(time.Since(sess.startedAt).Seconds())

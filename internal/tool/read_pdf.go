@@ -197,13 +197,11 @@ func handleReadPDF(_ context.Context, argsJSON string) (string, error) {
 	}
 	uploadsAbs, _ := filepath.Abs(config.Cfg.UploadDir)
 	outputAbs, _ := filepath.Abs(config.Cfg.OutputDir)
-	tmpDir := os.TempDir()
 	relUp, errUp := filepath.Rel(uploadsAbs, absPath)
 	relOut, errOut := filepath.Rel(outputAbs, absPath)
 	inUploads := errUp == nil && !strings.HasPrefix(relUp, "..")
 	inOutput := errOut == nil && !strings.HasPrefix(relOut, "..")
-	inTmp := absPath == tmpDir || strings.HasPrefix(absPath, tmpDir+string(os.PathSeparator))
-	if !inUploads && !inOutput && !inTmp {
+	if !inUploads && !inOutput && !isTmpPath(absPath) {
 		return "", fmt.Errorf("path must be within uploads/, output/, or /tmp directory")
 	}
 

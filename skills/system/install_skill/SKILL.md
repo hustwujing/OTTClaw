@@ -45,13 +45,13 @@ skill(action=run_script, skill_id=install_skill, script_name=clone.py, args=["<o
 
 **4d. Rewrite for OTTClaw:**
 
-*SKILL.md*: standard YAML Front Matter (`---` separators). HEAD: `skill_id` (lowercase, hyphens→underscores, digits/letters/underscores only), `name`/`display_name` from original, `enable: true`, `description`/`trigger` derived. CONTENT: translated + trimmed (4e + 4f).
+*SKILL.md*: standard YAML Front Matter (`---` separators). HEAD: `skill_id` (lowercase, hyphens→underscores, digits/letters/underscores only), `name`/`display_name` from original, `enable: true`, `description`/`trigger` derived. CONTENT: translated + trimmed (4e + 4f). **Scan step descriptions for hardcoded `/tmp/` or absolute temp paths — replace with `$AGENT_TMP_DIR` in shell examples, or "temporary directory" in prose.**
 
 *Scripts* — rewrite each individually, never copy as-is. For any script language: replace hardcoded `/tmp/...` paths with the cross-platform isolated pattern:
 ```python
 import os, tempfile
 _TMP_ROOT = os.path.realpath(tempfile.gettempdir())
-work_dir = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, os.environ.get("SKILL_SESSION_ID", "default")))
+work_dir = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, os.environ.get("SKILL_USER_ID", "default")))
 os.makedirs(work_dir, exist_ok=True)
 ```
 For bash: replace GNU-only commands:
@@ -98,7 +98,7 @@ List file names, then: `notify(action=confirm)` → "Confirm Install" / "Cancel"
 1. `kv(get, _install_skill_md)` → `notify(progress, "Writing SKILL.md...")`
 2. Pre-write: if `skill_template.md` not read in 4a, read it now.
 3. `skill(action=write, skill_id=..., content=...)` — omit `sub_path` for SKILL.md. On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue (YAML Front Matter `---` separators, missing HEAD fields, etc.) → `kv(set, _install_skill_md=<fixed content>)` → retry write immediately.
-4. If `_install_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="script/<name>")`.
+4. If `_install_scripts` non-empty: `notify(progress, "Writing scripts...")` → for each: `skill(write, sub_path="scripts/<name>")`.
 5. If `_install_references` non-empty: `notify(progress, "Writing references...")` → for each: `skill(write, sub_path="references/<name>")`.
 6. If `_install_assets` non-empty: `notify(progress, "Writing assets...")` → for each: `skill(write, sub_path="assets/<name>")`.
 7. `notify(progress, "Reloading...")` → `skill(action=reload)`.
@@ -134,7 +134,7 @@ Map to OTTClaw layout:
 | Source | Destination | Action |
 |--------|-------------|--------|
 | SKILL.md / manifest / README | `SKILL.md` | Rewrite to OTTClaw format |
-| `.py` / `.sh` / `.js` scripts | `script/<name>` | Rewrite (macOS-safe, Python 3 preferred) |
+| `.py` / `.sh` / `.js` scripts | `scripts/<name>` | Rewrite (macOS-safe, Python 3 preferred) |
 | Reference `.md` files | `references/<name>` | Rewrite if platform-specific; else keep |
 | Images, data, config | `assets/<name>` | Keep unless platform-specific |
 | Other files/subdirs | `<original-relative-path>` | Keep as-is |
@@ -143,9 +143,9 @@ Map to OTTClaw layout:
 
 ### Step P-6: Rewrite Files
 
-*SKILL.md*: HEAD per template (`skill_id`, `name`, `display_name`, `enable: true`, `description`, `trigger`). Translate to English, trim (same rules as Step 4d/4e/4f).
+*SKILL.md*: HEAD per template (`skill_id`, `name`, `display_name`, `enable: true`, `description`, `trigger`). Translate to English, trim (same rules as Step 4d/4e/4f). **Scan step descriptions for hardcoded `/tmp/` or absolute temp paths — replace with `$AGENT_TMP_DIR` in shell examples, or "temporary directory" in prose.**
 
-*Scripts*: same rewrite rules as Step 4d (bash GNU→macOS replacements, Python cross-platform fixes, `/tmp` → `tempfile.gettempdir()` + `SKILL_SESSION_ID`). Never copy as-is.
+*Scripts*: same rewrite rules as Step 4d (bash GNU→macOS replacements, Python cross-platform fixes, `/tmp` → `tempfile.gettempdir()` + `SKILL_USER_ID`). Never copy as-is.
 
 *References/Assets*: adapt platform-specific API calls/paths; otherwise keep unchanged.
 
@@ -167,7 +167,7 @@ kv(set, _import_others=<JSON array [{path, content}], [] if none>)
 
 List file names, `notify(action=confirm)` → "Write files" / "Go back to edit". Then write in order:
 1. SKILL.md: `skill(write, skill_id=..., content=...)` (no `sub_path`). On format error: re-read `skill(action=read_file, skill_id=skill_creator, sub_path="assets/skill_template.md")` → fix the specific issue → `kv(set, _import_skill_md=<fixed content>)` → retry immediately.
-2. Each script: `skill(write, sub_path="script/<name>")`
+2. Each script: `skill(write, sub_path="scripts/<name>")`
 3. Each reference: `skill(write, sub_path="references/<name>")`
 4. Each asset: `skill(write, sub_path="assets/<name>")`
 5. Each other: `skill(write, sub_path=<item.path>)`

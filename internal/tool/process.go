@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -348,22 +347,7 @@ func processKill(sessionID, signal string) (string, error) {
 		return "", fmt.Errorf("process not available (already exited?)")
 	}
 
-	var sig syscall.Signal
-	switch strings.ToUpper(signal) {
-	case "", "SIGTERM":
-		sig = syscall.SIGTERM
-	case "SIGKILL":
-		sig = syscall.SIGKILL
-	case "SIGINT":
-		sig = syscall.SIGINT
-	case "SIGHUP":
-		sig = syscall.SIGHUP
-	default:
-		return "", fmt.Errorf("unsupported signal %q; valid: SIGTERM, SIGKILL, SIGINT, SIGHUP", signal)
-	}
-
-	err = syscall.Kill(-sess.cmd.Process.Pid, sig)
-	if err != nil {
+	if err := sessionSendSignal(sess, signal); err != nil {
 		return "", fmt.Errorf("kill: %w", err)
 	}
 	return `"ok"`, nil
@@ -394,9 +378,7 @@ func processRemove(sessionID string) (string, error) {
 	select {
 	case <-sess.doneCh:
 	default:
-		if sess.cmd != nil && sess.cmd.Process != nil {
-			_ = syscall.Kill(-sess.cmd.Process.Pid, syscall.SIGKILL)
-		}
+		sessionForceKill(sess)
 	}
 
 	execRegistry.mu.Lock()

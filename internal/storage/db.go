@@ -602,19 +602,27 @@ func AddTokenUsage(userID, sessionID, model string, prompt, completion, cacheRea
 
 // AddOriginMessage 写入一条用户可见历史消息（不截断，支持附件）。
 // attachments 为 nil 或空切片时 Attachments 字段存空字符串。
+// 写入后同步更新 sessions.last_origin_msg_at，供 Langfuse scorer 条件 A 检测静默超时。
 func AddOriginMessage(userID, sessionID, role, content string, attachments []Attachment) error {
 	attJSON := ""
 	if len(attachments) > 0 {
 		b, _ := json.Marshal(attachments)
 		attJSON = string(b)
 	}
-	return DB.Create(&OriginSessionMessage{
+	if err := DB.Create(&OriginSessionMessage{
 		UserID:      userID,
 		SessionID:   sessionID,
 		Role:        role,
 		Content:     content,
 		Attachments: attJSON,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	// 同步 last_origin_msg_at，忽略错误（非关键操作）
+	DB.Model(&Session{}).
+		Where("session_id = ?", sessionID).
+		Update("last_origin_msg_at", time.Now())
+	return nil
 }
 
 // GetOriginMessages 按 session_id 查询全部用户可见消息，按时间升序

@@ -20,7 +20,6 @@ PID_DIR="$ROOT_DIR/run"
 PID_FILE="$PID_DIR/server.pid"
 LOG_DIR="${LOG_DIR:-logs}"
 LOG_FILE_STDOUT="$LOG_DIR/stdout.log"
-BROWSER_SERVER_DIR="$ROOT_DIR/browser-server"
 
 # ---- 二进制检查 ----
 if [ ! -f "$BIN" ]; then
@@ -32,41 +31,6 @@ fi
 # ---- 扩展 PATH：补全 nvm / Homebrew / 系统常见 node 路径（非交互式 SSH 不读 .zshrc）----
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null || true
 export PATH="/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/opt/node/bin:$PATH"
-
-# ---- Node.js 检查 + browser-server 启动（Playwright HTTP sidecar） ----
-BROWSER_PID_FILE="$PID_DIR/browser-server.pid"
-if command -v node &>/dev/null; then
-  echo "[start] Node.js 版本：$(node --version)"
-  if [ -f "$BROWSER_SERVER_DIR/package.json" ]; then
-    if [ ! -d "$BROWSER_SERVER_DIR/node_modules" ]; then
-      echo "[start] 安装 browser-server 依赖..."
-      (cd "$BROWSER_SERVER_DIR" && npm install --silent)
-      echo "[start] browser-server 依赖安装完成"
-    fi
-  fi
-
-  # 启动 browser-server（若已在运行则跳过）
-  if [ -f "$BROWSER_SERVER_DIR/server.js" ]; then
-    _bs_running=false
-    if [ -f "$BROWSER_PID_FILE" ]; then
-      _bs_pid="$(tr -d '[:space:]' < "$BROWSER_PID_FILE")"
-      if [ -n "$_bs_pid" ] && kill -0 "$_bs_pid" 2>/dev/null; then
-        echo "[start] browser-server 已在运行，PID=$_bs_pid"
-        _bs_running=true
-      else
-        rm -f "$BROWSER_PID_FILE"
-      fi
-    fi
-    if [ "$_bs_running" = "false" ]; then
-      echo "[start] 启动 browser-server..."
-      nohup node "$BROWSER_SERVER_DIR/server.js" >> "$LOG_DIR/browser-server.log" 2>&1 &
-      echo "$!" > "$BROWSER_PID_FILE"
-      echo "[start] browser-server 已启动，PID=$(cat "$BROWSER_PID_FILE")"
-    fi
-  fi
-else
-  echo "[start] 警告：未找到 node 命令，浏览器自动化功能不可用"
-fi
 
 # ---- .env 检查 ----
 if [ ! -f "$ROOT_DIR/.env" ]; then

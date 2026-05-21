@@ -11,19 +11,20 @@
 //	  system/              ← 系统技能（所有用户可见）
 //	    {skill_name}/
 //	      SKILL.md
-//	      script/
+//	      scripts/
 //	      assets/
 //	  users/               ← 用户个人技能（仅对应用户可见）
 //	    {user_id}/
 //	      {skill_name}/
 //	        SKILL.md
-//	        script/
+//	        scripts/
 //	        assets/
 //
 // 服务启动时只加载 HEAD；LLM 需要时通过 get_skill_content 工具懒加载 CONTENT
 package skill
 
 import (
+	"OTTClaw/internal/logger"
 	"OTTClaw/internal/storage"
 	"fmt"
 	"os"
@@ -96,7 +97,8 @@ func (s *store) LoadAll(dir string) error {
 			}
 			sk, err := parseSkillFile(mdPath, skillDir)
 			if err != nil {
-				return fmt.Errorf("parse system skill in %q: %w", skillDir, err)
+				logger.Warn("skill", "", "", fmt.Sprintf("skip system skill %q: %v", skillDir, err), 0)
+				continue
 			}
 			if !sk.Enable {
 				continue
@@ -130,7 +132,8 @@ func (s *store) LoadAll(dir string) error {
 					}
 					sk, err := parseSkillFile(mdPath, skillDir)
 					if err != nil {
-						return fmt.Errorf("parse user skill in %q: %w", skillDir, err)
+						logger.Warn("skill", "", "", fmt.Sprintf("skip user skill %q: %v", skillDir, err), 0)
+						continue
 					}
 					if !sk.Enable {
 						continue
@@ -153,7 +156,8 @@ func (s *store) LoadAll(dir string) error {
 					}
 					sk, err := parseSkillFile(mdPath, skillDir)
 					if err != nil {
-						return fmt.Errorf("parse self-improving skill in %q: %w", skillDir, err)
+						logger.Warn("skill", "", "", fmt.Sprintf("skip self-improving skill %q: %v", skillDir, err), 0)
+						continue
 					}
 					if !sk.Enable {
 						continue

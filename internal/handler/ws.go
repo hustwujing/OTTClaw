@@ -107,6 +107,8 @@ func WS(c *gin.Context) {
 				logger.Error("ws", userID, sessionID, "agent run failed", err, 0)
 				// writer.WriteError 已在 agent 内调用，此处不重复发送
 			}
+			// 条件 B：消息积压检查（异步，不阻塞）
+			go agent.Get().MaybeScoreSession(sessionID, userID)
 		}()
 	}
 }

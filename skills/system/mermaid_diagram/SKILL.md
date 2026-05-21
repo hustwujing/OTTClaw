@@ -89,7 +89,7 @@ print(os.path.abspath(out_path))
 
 ### Execution steps
 
-1. Use `exec` to run the Python script (inline via `python3 -c "..."` or write to a temp file first).
+1. Use `exec(type="python", code=<script>)` to run the Python script. Pass the full source as `code` — no need to write temp files.
    The script prints the **absolute path** of the saved PNG to stdout.
 
 2. Read the absolute path from `exec` result's `stdout` field.

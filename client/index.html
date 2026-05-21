@@ -798,6 +798,75 @@ footer {
 .hist-act-btn.remove:hover:not(:disabled) { background: rgba(239,68,68,.09); }
 [data-theme="dark"] .hist-act-btn.run { color: #4ade80; }
 
+/* ── Cron Jobs Panel ─────────────────────────────────────────────── */
+.jobs-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: flex-start; justify-content: flex-end;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+.jobs-overlay.hidden { display: none !important; }
+.jobs-panel {
+  background: var(--bg);
+  width: min(720px, 100vw);
+  height: 100dvh;
+  display: flex; flex-direction: column;
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+}
+.jobs-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.jobs-head h2 { font-size: 1rem; font-weight: 700; flex: 1; margin: 0; }
+.jobs-table-wrap { flex: 1; overflow-y: auto; overflow-x: auto; }
+.jobs-table-wrap::-webkit-scrollbar { width: 4px; height: 4px; }
+.jobs-table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.jobs-table {
+  width: 100%; border-collapse: collapse;
+  font-size: .8125rem;
+}
+.jobs-table th, .jobs-table td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.jobs-table th {
+  background: var(--bg2); font-weight: 600; color: var(--muted);
+  font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  position: sticky; top: 0; z-index: 1;
+}
+.jobs-table tr:hover td { background: color-mix(in srgb, var(--border) 20%, transparent); }
+.jobs-empty {
+  padding: 48px 16px; text-align: center;
+  color: var(--muted); font-size: .875rem;
+}
+.jobs-foot {
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 10px 16px; border-top: 1px solid var(--border); flex-shrink: 0;
+}
+.jobs-toggle {
+  position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0;
+}
+.jobs-toggle input { opacity: 0; width: 0; height: 0; }
+.jobs-toggle-slider {
+  position: absolute; inset: 0; background: var(--border);
+  border-radius: 9px; cursor: pointer; transition: background .2s;
+}
+.jobs-toggle-slider::before {
+  content: ''; position: absolute;
+  width: 12px; height: 12px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: transform .2s;
+}
+.jobs-toggle input:checked + .jobs-toggle-slider { background: var(--primary); }
+.jobs-toggle input:checked + .jobs-toggle-slider::before { transform: translateX(14px); }
+.jobs-sched { color: var(--muted); font-size: .75rem; margin-top: 2px; }
+.jobs-name-cell { max-width: 160px; }
+.jobs-name-cell .jobs-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobs-time-cell { white-space: nowrap; font-size: .75rem; color: var(--muted); }
+
 /* ── Stats Panel ─────────────────────────────────────────────────── */
 .stats-overlay {
   position: fixed; inset: 0;
@@ -938,6 +1007,14 @@ footer {
       <button class="icon-btn" id="btn-new" title="新建会话">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
           <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
+      <!-- Cron jobs list -->
+      <button class="icon-btn" id="btn-jobs" title="定时任务列表">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+          <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+          <line x1="3" y1="10" x2="21" y2="10"/>
         </svg>
       </button>
       <!-- Cron history -->
@@ -1082,6 +1159,45 @@ footer {
         <span class="hist-page-num" id="hist-page-num"></span>
         <button class="btn btn-ghost" id="btn-hist-next" style="padding:6px 12px">下一页</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Cron Jobs Panel ═══════════════════════════════════════════════ -->
+<div id="jobs-overlay" class="jobs-overlay hidden">
+  <div class="jobs-panel">
+    <div class="jobs-head">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+      </svg>
+      <h2>定时任务列表</h2>
+      <button class="btn btn-ghost" id="btn-jobs-refresh" style="flex-shrink:0;padding:5px 12px">刷新</button>
+      <button class="icon-btn" id="btn-jobs-close" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="jobs-table-wrap">
+      <table class="jobs-table">
+        <thead>
+          <tr>
+            <th>任务名称 / 调度</th>
+            <th>启用</th>
+            <th>下次执行</th>
+            <th>上次执行</th>
+            <th>执行次数</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="jobs-tbody"></tbody>
+      </table>
+      <div id="jobs-empty" class="jobs-empty hidden">暂无定时任务</div>
+    </div>
+    <div class="jobs-foot">
+      <span id="jobs-total-text" style="font-size:.8125rem;color:var(--muted)"></span>
     </div>
   </div>
 </div>
@@ -2956,7 +3072,7 @@ function histRender(rows) {
       actWrap.appendChild(killBtn);
     } else {
       const runBtn    = _histBtn('run',    '触发', () => histRunJob(r.job_id, tr));
-      const removeBtn = _histBtn('remove', '移除', () => histRemoveJob(r.job_id, tr));
+      const removeBtn = _histBtn('remove', '移除', () => histRemoveJob(r.id, tr));
       actWrap.appendChild(runBtn);
       actWrap.appendChild(removeBtn);
     }
@@ -3033,14 +3149,14 @@ async function histRunJob(jobID, rowEl) {
   } catch (e) { toast('操作失败: ' + String(e), 'err'); _histEnableRow(rowEl); histLoad(); }
 }
 
-async function histRemoveJob(jobID, rowEl) {
+async function histRemoveJob(histID, rowEl) {
   _histDisableRow(rowEl);
   try {
-    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}`, {
+    const r = await fetch(`${S.url}/api/cron/history/${encodeURIComponent(histID)}`, {
       method: 'DELETE', headers: { Authorization: `Bearer ${S.token}` },
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    toast('定时任务已永久移除');
+    toast('历史记录已移除');
     HIST.page = 1;
     histLoad();
   } catch (e) { toast('操作失败: ' + String(e), 'err'); histLoad(); }
@@ -3061,6 +3177,146 @@ function openHistPanel() {
 
 function closeHistPanel() {
   document.getElementById('hist-overlay').classList.add('hidden');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Cron Jobs Panel
+// ══════════════════════════════════════════════════════════════════════
+function fmtSchedule(schedJSON) {
+  try {
+    const s = JSON.parse(schedJSON);
+    if (s.kind === 'cron') return `cron: ${s.expr}${s.tz ? ' (' + s.tz + ')' : ''}`;
+    if (s.kind === 'every') {
+      const ms = s.everyMs;
+      if (ms >= 3600000) return `每 ${ms / 3600000} 小时`;
+      if (ms >= 60000)   return `每 ${ms / 60000} 分钟`;
+      return `每 ${ms / 1000} 秒`;
+    }
+    if (s.kind === 'at') return `单次: ${new Date(s.at).toLocaleString('zh-CN')}`;
+  } catch (_) {}
+  return schedJSON;
+}
+
+function fmtTimeShort(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+async function jobsLoad() {
+  if (!S.token) return;
+  try {
+    const r = await fetch(`${S.url}/api/cron/jobs`, {
+      headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    jobsRender(data.jobs || []);
+  } catch (e) { toast('加载任务失败: ' + String(e), 'err'); }
+}
+
+function jobsRender(jobs) {
+  const tbody = document.getElementById('jobs-tbody');
+  const empty = document.getElementById('jobs-empty');
+  const totalEl = document.getElementById('jobs-total-text');
+  tbody.innerHTML = '';
+  totalEl.textContent = `共 ${jobs.length} 个任务`;
+  if (!jobs.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  jobs.forEach(j => {
+    const tr = document.createElement('tr');
+    tr.dataset.jobId = j.id;
+
+    // Name + schedule
+    const nameTd = document.createElement('td');
+    nameTd.className = 'jobs-name-cell';
+    nameTd.innerHTML = `<div class="jobs-name" title="${escHtml(j.name)}">${escHtml(j.name)}</div>`
+      + `<div class="jobs-sched">${escHtml(fmtSchedule(j.schedule_json))}</div>`;
+
+    // Toggle
+    const toggleTd = document.createElement('td');
+    const label = document.createElement('label');
+    label.className = 'jobs-toggle';
+    label.title = j.enabled ? '点击禁用' : '点击启用';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = j.enabled;
+    checkbox.addEventListener('change', () => jobsToggleEnabled(j.id, checkbox.checked, label));
+    const slider = document.createElement('span');
+    slider.className = 'jobs-toggle-slider';
+    label.appendChild(checkbox);
+    label.appendChild(slider);
+    toggleTd.appendChild(label);
+
+    // Next run
+    const nextTd = document.createElement('td');
+    nextTd.className = 'jobs-time-cell';
+    nextTd.textContent = j.enabled && j.next_run_at ? fmtTimeShort(j.next_run_at) : '—';
+
+    // Last run
+    const lastTd = document.createElement('td');
+    lastTd.className = 'jobs-time-cell';
+    lastTd.textContent = fmtTimeShort(j.last_run_at);
+
+    // Run count
+    const countTd = document.createElement('td');
+    countTd.textContent = j.run_count ?? 0;
+
+    // Actions
+    const actTd = document.createElement('td');
+    actTd.style.whiteSpace = 'nowrap';
+    const delBtn = document.createElement('button');
+    delBtn.className = 'hist-act-btn remove';
+    delBtn.textContent = '删除';
+    delBtn.addEventListener('click', () => jobsDeleteJob(j.id, tr));
+    actTd.appendChild(delBtn);
+
+    tr.appendChild(nameTd);
+    tr.appendChild(toggleTd);
+    tr.appendChild(nextTd);
+    tr.appendChild(lastTd);
+    tr.appendChild(countTd);
+    tr.appendChild(actTd);
+    tbody.appendChild(tr);
+  });
+}
+
+async function jobsToggleEnabled(jobID, enabled, labelEl) {
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${S.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    toast(enabled ? '任务已启用' : '任务已禁用');
+    jobsLoad();
+  } catch (e) {
+    toast('操作失败: ' + String(e), 'err');
+    jobsLoad(); // 回滚 UI
+  }
+}
+
+async function jobsDeleteJob(jobID, rowEl) {
+  rowEl.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  try {
+    const r = await fetch(`${S.url}/api/cron/${encodeURIComponent(jobID)}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${S.token}` },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    toast('定时任务已删除');
+    jobsLoad();
+  } catch (e) { toast('操作失败: ' + String(e), 'err'); jobsLoad(); }
+}
+
+function openJobsPanel() {
+  if (!S.token) { toast('请先连接服务器', 'err'); return; }
+  document.getElementById('jobs-overlay').classList.remove('hidden');
+  jobsLoad();
+}
+
+function closeJobsPanel() {
+  document.getElementById('jobs-overlay').classList.add('hidden');
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -3279,6 +3535,14 @@ function closeStatsPanel() {
   // clicking the backdrop closes the panel
   document.getElementById('hist-overlay').addEventListener('click', e => {
     if (e.target === document.getElementById('hist-overlay')) closeHistPanel();
+  });
+
+  // Jobs panel
+  document.getElementById('btn-jobs').addEventListener('click', openJobsPanel);
+  document.getElementById('btn-jobs-close').addEventListener('click', closeJobsPanel);
+  document.getElementById('btn-jobs-refresh').addEventListener('click', jobsLoad);
+  document.getElementById('jobs-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('jobs-overlay')) closeJobsPanel();
   });
 
   // Stats panel

@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -100,10 +102,10 @@ func main() {
 
 	// ---- 3.7 启动 Node.js Playwright 浏览器 sidecar ----
 	if err := browser.Default.Start(); err != nil {
-		logger.Warn("main", "", "", fmt.Sprintf("browser server not started: %v", err), 0)
-	} else {
-		defer browser.Default.Stop()
+		fmt.Fprintf(os.Stderr, "FATAL: browser server failed to start: %v\n", err)
+		os.Exit(1)
 	}
+	defer browser.Default.Stop()
 
 	// ---- 3.8 注入 agent runner 到 cron 包，并启动定时任务调度器 ----
 	// RunCronJob 内部根据 creatorSession.Source 自动选择 writer：
@@ -116,6 +118,13 @@ func main() {
 	cron.Default.Start()
 	defer cron.Default.Stop()
 	logger.Info("main", "", "", "cron scheduler started", 0)
+
+	// ---- 3.9 注入 Langfuse scorer 函数，并启动条件 A 定时扫描 ----
+	cron.SetScorerFunc(func(sessionID, userID string) {
+		agent.Get().ScoreSession(sessionID, userID)
+	})
+	cron.DefaultLangfuseScorer.Start()
+	defer cron.DefaultLangfuseScorer.Stop()
 
 	// ---- 4. 配置 Gin 路由 ----
 	gin.SetMode(gin.ReleaseMode)
@@ -164,12 +173,16 @@ func main() {
 		// 实时并发统计：GET /api/stats
 		authed.GET("/api/stats", handler.GetStats)
 
+		// 定时任务列表：GET /api/cron/jobs
+		authed.GET("/api/cron/jobs", handler.GetCronJobs)
 		// 定时任务执行历史：GET /api/cron/history?q=&page=&page_size=
 		authed.GET("/api/cron/history", handler.GetCronHistory)
-		// 定时任务操作：取消 / 强制中止 / 立即触发 / 永久删除
+		authed.DELETE("/api/cron/history/:history_id", handler.DeleteCronHistory)
+		// 定时任务操作：取消 / 强制中止 / 立即触发 / 启用禁用 / 永久删除
 		authed.POST("/api/cron/:job_id/cancel", handler.CancelCronJob)
 		authed.POST("/api/cron/:job_id/force-kill", handler.ForceKillCronJob)
 		authed.POST("/api/cron/:job_id/run", handler.RunCronJobNow)
+		authed.PATCH("/api/cron/:job_id", handler.PatchCronJob)
 		authed.DELETE("/api/cron/:job_id", handler.DeleteCronJob)
 
 		// 子任务操作：取消
@@ -200,7 +213,22 @@ func main() {
 	r.Static("/uploads", config.Cfg.UploadDir)
 
 	// 生成文件静态访问：GET /output/{dir}/{filename}（供前端内联展示图片等）
-	r.Static("/output", config.Cfg.OutputDir)
+	// SVG 文件会在服务时动态修复裸 & 号，防止浏览器 XML 解析失败
+	outputDir := config.Cfg.OutputDir
+	r.GET("/output/*filepath", func(c *gin.Context) {
+		fp := filepath.Join(outputDir, c.Param("filepath"))
+		if strings.ToLower(filepath.Ext(fp)) == ".svg" {
+			data, err := os.ReadFile(fp)
+			if err != nil {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			fixed := tool.FixSVGAmpersands(string(data))
+			c.Data(http.StatusOK, "image/svg+xml", []byte(fixed))
+			return
+		}
+		c.File(fp)
+	})
 
 	// ---- 5 & 6. 统一启动飞书和企微渠道 ----
 	// makeRunner 创建通用 AgentRunFunc：各渠道共享相同的 runner 逻辑
@@ -257,26 +285,21 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
-	// SIGUSR1：热重载 ROLE.md / TOOL.md / 技能，不重启进程、不中断运行中的会话。
-	// 用法：kill -USR1 <pid>
-	reload := make(chan os.Signal, 1)
-	signal.Notify(reload, syscall.SIGUSR1)
-	go func() {
-		for range reload {
-			logger.Info("main", "", "", "SIGUSR1: reloading config...", 0)
-			if err := agent.Get().Reload(); err != nil {
-				logger.Warn("main", "", "", "config reload failed: "+err.Error(), 0)
-			} else {
-				logger.Info("main", "", "", "ROLE.md + TOOL.md reloaded", 0)
-			}
-			if err := skill.Store.LoadAll(config.Cfg.SkillsDir); err != nil {
-				logger.Warn("main", "", "", "skill reload failed: "+err.Error(), 0)
-			} else {
-				heads := skill.Store.GetAllHeads()
-				logger.Info("main", "", "", fmt.Sprintf("skills reloaded: %d skill(s)", len(heads)), 0)
-			}
+	// 热重载 ROLE.md / TOOL.md / 技能：Unix 通过 SIGUSR1 触发，Windows 通过 HTTP API 触发。
+	startReloadSignalHandler(func() {
+		logger.Info("main", "", "", "SIGUSR1: reloading config...", 0)
+		if err := agent.Get().Reload(); err != nil {
+			logger.Warn("main", "", "", "config reload failed: "+err.Error(), 0)
+		} else {
+			logger.Info("main", "", "", "ROLE.md + TOOL.md reloaded", 0)
 		}
-	}()
+		if err := skill.Store.LoadAll(config.Cfg.SkillsDir); err != nil {
+			logger.Warn("main", "", "", "skill reload failed: "+err.Error(), 0)
+		} else {
+			heads := skill.Store.GetAllHeads()
+			logger.Info("main", "", "", fmt.Sprintf("skills reloaded: %d skill(s)", len(heads)), 0)
+		}
+	})
 
 	go func() {
 		if err := srv.Serve(tcpNoDelayListener{ln}); err != nil && err != http.ErrServerClosed {

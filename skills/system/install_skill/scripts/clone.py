@@ -9,12 +9,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 repo = sys.argv[1] if len(sys.argv) > 1 else ""
 skill_path = sys.argv[2] if len(sys.argv) > 2 else ""
 url = f"https://github.com/{repo}.git"
-session_id = os.environ.get("SKILL_SESSION_ID", "default")
-dest = f"/tmp/_skill_install_{session_id}"
+user_id = os.environ.get("SKILL_USER_ID", "default")
+dest = os.path.join(tempfile.gettempdir(), f"_skill_install_{user_id}")
 
 shutil.rmtree(dest, ignore_errors=True)
 

@@ -68,7 +68,7 @@
 
 ---
 
-## 4. 脚本（script/）使用指南
+## 4. 脚本（scripts/）使用指南
 
 ### 何时需要脚本
 
@@ -105,27 +105,47 @@ import sys
 import tempfile
 
 
+# ── run_script 注入的环境变量 ─────────────────────────────────────────
+# 以下变量由系统自动注入，脚本可直接通过 os.environ.get() 读取：
+#
+#   SKILL_USER_ID    当前用户 ID，用于多用户并发隔离（最常用）
+#   SKILL_SESSION_ID 当前会话 ID，用于同一用户多会话并发隔离
+#   SKILL_DIR        本技能根目录的绝对路径，可用于读取 assets/ 等子目录
+#   AGENT_TMP_DIR    用户级隔离临时目录（os.TempDir()/{userID}），与 exec 工具一致
+#   TMPDIR / TMP / TEMP  同 AGENT_TMP_DIR（Python tempfile / bash mktemp 自动尊重）
+#
+# 由于 TMPDIR 已被覆盖为用户隔离路径，tempfile.gettempdir() 自动返回用户级目录，
+# 与 exec 工具行为完全一致。
+#
+# 示例：
+#   user_id    = os.environ.get("SKILL_USER_ID", "default")
+#   session_id = os.environ.get("SKILL_SESSION_ID", "default")
+#   skill_dir  = os.environ.get("SKILL_DIR", "")
+#   asset_path = os.path.join(skill_dir, "assets", "config.json")
+#
 # ── 临时目录（需要步骤间中转文件时使用，否则删除）──────────────────────
-# tempfile.gettempdir() 跨平台兼容（macOS /tmp、Linux /tmp、Windows %TEMP%）
-# realpath 解析软链接（macOS /tmp -> /private/tmp）
-# SKILL_SESSION_ID 保证多用户并发隔离
+# ⚠️ 严禁硬编码 /tmp 或任何绝对临时路径。必须用下方 _get_work_dir() 获取隔离目录。
+# TMPDIR 已由系统覆盖为 os.TempDir()/{userID}，tempfile.gettempdir() 自动返回用户隔离路径。
+# _get_work_dir() 在此基础上再加 skill_id 前缀，防止不同技能的临时文件互相干扰。
+# realpath 解析软链接，确保路径在所有平台上一致（macOS /var/folders/... 等符号链接环境）。
 _TMP_ROOT = os.path.realpath(tempfile.gettempdir())
 
 def _get_work_dir(skill_id):
     # type: (str) -> str
-    session_id = os.environ.get("SKILL_SESSION_ID", "default")
-    path = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, session_id))
+    user_id = os.environ.get("SKILL_USER_ID", "default")
+    path = os.path.join(_TMP_ROOT, "{}_{}".format(skill_id, user_id))
     os.makedirs(path, exist_ok=True)
     return path
 
 # 用法：work_dir = _get_work_dir("my_skill_id")
+#       out_file = os.path.join(work_dir, "result.html")
 # 持久文件：写入 output/{SKILL_USER_ID}/ 并将路径 print 到 stdout，
 # 由 LLM 调用 output_file(action=download) 生成下载链接。
 #
 # ── LLM 直接执行（无脚本）时的隔离方案 ──────────────────────────────
 # 不经过 run_script 的纯 LLM 步骤无法读取环境变量，改为：
-#   1. 调用 get_session_info 获取 session_id
-#   2. 用 exec 创建隔离目录：/tmp/{skill_id}_{session_id}/
+#   1. 调用 get_session_info 获取 user_id
+#   2. 用 exec 创建隔离目录：os.path.join(os.environ["AGENT_TMP_DIR"], f"{skill_id}_{user_id}")
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -257,7 +277,7 @@ Markdown 报告，包含：数据概览表 + 每个数值列的统计表 + 简�
 2. `skill_id` 只允许小写字母、数字和下划线。**不允许**：大写字母、中文字符、空格或连字符。
 3. 在 HEAD 中，`skill_id` 和 `name` 为必填项——留空将被工具拒绝。强烈推荐填写 `display_name`；若省略，对话界面将回退显示 `name`。`enable: true` 为必填项——如果缺失或设为 `false`，该技能将被跳过且不可用。
 4. CONTENT 段不能为空——必须包含实质性内容。
-5. 如果 SKILL.md 引用了 `skill(action=run_script)`，对应的脚本文件**必须通过 `skill(action=write, skill_id=..., content=..., sub_path="script/<文件名>")` 创建**。
+5. 如果 SKILL.md 引用了 `skill(action=run_script)`，对应的脚本文件**必须通过 `skill(action=write, skill_id=..., content=..., sub_path="scripts/<文件名>")` 创建**。
 6. 如果 SKILL.md 引用了 `skill(action=read_file, ..., sub_path="assets/...")`，对应的资源文件**必须通过 `skill(action=write, skill_id=..., content=..., sub_path="assets/<文件名>")` 创建**。
 7. **无脚本警示（必填，仅无脚本技能）**：如果该技能没有任何脚本文件，必须在执行步骤第一步之前插入以下警示块，防止 LLM 错误调用 `run_script`：
    ```
@@ -267,3 +287,5 @@ Markdown 报告，包含：数据概览表 + 每个数值列的统计表 + 简�
    ```
    > Execute all steps strictly in order, one step at a time. Do not skip or merge steps. Wait for each step's result before proceeding to the next.
    ```
+9. **脚本临时路径（必须遵守）**：脚本中**严禁硬编码 `/tmp/` 或任何绝对临时路径**。所有临时/中间文件必须通过骨架模板中的 `_get_work_dir(skill_id)` 函数获取隔离目录，否则在不同平台或多用户并发时会出现路径不可访问或文件互相覆盖的问题。
+10. **SKILL.md 步骤描述中的临时路径**：SKILL.md 的步骤说明文本中同样**禁止出现 `/tmp/` 硬编码路径**。shell 命令示例用 `$AGENT_TMP_DIR`，文字描述用「临时目录」，不得写死绝对路径。

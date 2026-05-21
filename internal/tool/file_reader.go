@@ -36,11 +36,9 @@ func readUploadedFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	tmpDir := os.TempDir()
-	inTmp := absPath == tmpDir || strings.HasPrefix(absPath, tmpDir+string(os.PathSeparator))
 	rel, relErr := filepath.Rel(uploadsAbs, absPath)
 	inUploads := relErr == nil && !strings.HasPrefix(rel, "..")
-	if !inUploads && !inTmp {
+	if !inUploads && !isTmpPath(absPath) {
 		return "", fmt.Errorf("path must be within uploads/ or /tmp directory")
 	}
 

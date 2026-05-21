@@ -22,13 +22,18 @@ import (
 
 	"OTTClaw/config"
 	"OTTClaw/internal/honcho"
+	"OTTClaw/internal/langfuse"
 	"OTTClaw/internal/llm"
 	"OTTClaw/internal/logger"
 	"OTTClaw/internal/mcp"
 	"OTTClaw/internal/skill"
 	"OTTClaw/internal/storage"
 	"OTTClaw/internal/tool" // WithProgressSender 将 WriteProgress 闭包注入 ctx
+
+	"github.com/google/uuid"
 )
+
+const maxGeneratedImagesPerExec = 20
 
 // StreamWriter 流式输出接口，由 WebSocket/SSE handler 实现
 type StreamWriter interface {
@@ -98,6 +103,9 @@ type Agent struct {
 	honchoCtxMu    sync.RWMutex
 	honchoCtxCache map[string]string // key: userID → latest prefetched Honcho context string
 	honchoWg       sync.WaitGroup    // 追踪 in-flight syncToHoncho goroutine，优雅退出时等待完成
+
+	// Langfuse 可观测性（nil 表示未启用）
+	langfuseClient *langfuse.Client
 
 	// 后台 goroutine 生命周期管理
 	// bgCtx 在 Shutdown() 时被 cancel，使所有后台 goroutine 能感知关闭信号并及时退出。
@@ -254,6 +262,13 @@ func Init() error {
 			config.Cfg.HonchoAppID,
 		)
 	}
+	if config.Cfg.LangfuseEnabled {
+		singleton.langfuseClient = langfuse.NewClient(
+			config.Cfg.LangfuseBaseURL,
+			config.Cfg.LangfusePublicKey,
+			config.Cfg.LangfuseSecretKey,
+		)
+	}
 	go singleton.startSubTaskSweep()
 	return nil
 }
@@ -281,6 +296,12 @@ type pendingToolCall struct{ id, name string }
 func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, writer StreamWriter) error {
 	start := time.Now()
 	logger.Debug("agent", userID, sessionID, "agent 循环启动", 0)
+
+	// runID 是本次 Run() 的唯一标识，作为 Langfuse trace ID（每次 Run 一条 trace）。
+	// sessionID 作为 Langfuse sessionId 字段，将同一对话的多次 Run 归为一组。
+	runID := uuid.New().String()
+
+	var toolContextBuf strings.Builder // 累积工具调用结果，供 Langfuse 评估器使用
 
 	ctx = a.setupContext(ctx, userID, sessionID, writer, start)
 	defer mcp.Global.CloseSession(sessionID)
@@ -317,6 +338,28 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 	promptBD := state.promptBD
 	toolsChars, histChars, userChars := state.toolsChars, state.histChars, state.userChars
 	isSubagent := state.isSubagent
+	parentSessionID := state.parentSessionID
+
+	// Langfuse: 埋点 1 — trace-create（记录整次 Agent Run 的开始）
+	// 移到 initRun 之后，以便 isSubagent / parentSessionID 已知，可正确打 tag。
+	if a.langfuseClient != nil {
+		traceBody := langfuse.TraceBody{
+			ID: runID, Name: "agent-run",
+			UserID: userID, SessionID: sessionID,
+			Input: userInput,
+		}
+		if isSubagent {
+			traceBody.Tags = []string{"subagent"}
+			if parentSessionID != "" {
+				traceBody.Metadata = map[string]any{"parentSessionId": parentSessionID}
+			}
+		}
+		a.langfuseClient.Enqueue(langfuse.Event{
+			ID: uuid.New().String(), Timestamp: start, Type: "trace-create",
+			Body: traceBody,
+		})
+
+	}
 
 	// LLM 循环：最多执行 N 轮，防止无限循环（AGENT_MAX_ITERATIONS，默认 20）
 	maxIterations := config.Cfg.AgentMaxIterations
@@ -414,6 +457,8 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 		//   - 429 限速：最多重试 3 次，退避 3s / 8s / 15s，期间推送友好进度给用户
 		//   - 瞬时网络错误（EOF/broken pipe 等）：最多重试 1 次，500ms 后重试
 		//   - 其他错误：直接失败，显示友好文案（不暴露原始 API 错误）
+		genID := uuid.New().String()
+		genStartTime := time.Now()
 		var eventCh <-chan llm.StreamEvent
 		lastAPIMsgCount = len(messages)
 		{
@@ -451,6 +496,18 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				_ = writer.WriteError(friendlyLLMErr(err))
 				return err
 			}
+		}
+
+		// Langfuse: 埋点 2 — generation-create（记录 LLM 调用开始）
+		if a.langfuseClient != nil {
+			a.langfuseClient.Enqueue(langfuse.Event{
+				ID: uuid.New().String(), Timestamp: genStartTime, Type: "generation-create",
+				Body: langfuse.GenerationBody{
+					ID: genID, TraceID: runID, ParentObservationID: runID,
+					Name: "llm-call", Model: config.Cfg.LLMModel,
+					StartTime: genStartTime, Input: messages,
+				},
+			})
 		}
 
 		// 收集本轮输出
@@ -570,6 +627,23 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 					logger.Warn("agent", userID, sessionID, "save token usage failed", 0)
 				}
 			}(*iterUsage)
+
+			// Langfuse: 埋点 3 — generation-update（记录 LLM 调用结束 + token 用量）
+			if a.langfuseClient != nil {
+				endTime := time.Now()
+				a.langfuseClient.Enqueue(langfuse.Event{
+					ID: uuid.New().String(), Timestamp: endTime, Type: "generation-update",
+					Body: langfuse.GenerationBody{
+						ID: genID, TraceID: runID, EndTime: &endTime,
+						Output: textBuf.String(),
+						Usage: &langfuse.UsageBody{
+							Input:  iterUsage.PromptTokens,
+							Output: iterUsage.CompletionTokens,
+							Total:  iterUsage.TotalTokens,
+						},
+					},
+				})
+			}
 		}
 
 		// 流读取阶段的 429 限速：整轮重试（最多 2 次，退避 5s / 15s）。
@@ -704,6 +778,20 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			logger.Debug("agent", userID, sessionID,
 				fmt.Sprintf("agent loop end: normal answer, total_iter=%d cost=%dms",
 					iter+1, time.Since(start).Milliseconds()), 0)
+			// Langfuse: 埋点 6 — trace-create 二次（写入最终输出 + 工具 context）
+			if a.langfuseClient != nil {
+				now := time.Now()
+				meta := map[string]any{}
+				if toolCtx := toolContextBuf.String(); toolCtx != "" {
+					meta["context"] = toolCtx
+				}
+				a.langfuseClient.Enqueue(langfuse.Event{
+					ID: uuid.New().String(), Timestamp: now, Type: "trace-create",
+					Body: langfuse.TraceBody{
+						ID: runID, Output: assistantText, Metadata: meta,
+					},
+				})
+			}
 			_ = writer.WriteEnd()
 			return nil
 		}
@@ -755,6 +843,7 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			dbContent string
 			toolErr   error
 			toolStart time.Time
+			toolEnd   time.Time
 		}
 		newestUsrMsg = []byte("")
 		tcResults := make([]toolCallRes, len(toolCalls))
@@ -771,14 +860,26 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				toolStart := time.Now()
 				logger.Debug("tool", userID, sessionID,
 					fmt.Sprintf("executing tool=%s", tc.Function.Name), 0)
+				// Langfuse: 埋点 4 — span-create（记录工具调用开始）
+				if a.langfuseClient != nil {
+					a.langfuseClient.Enqueue(langfuse.Event{
+						ID: uuid.New().String(), Timestamp: toolStart, Type: "span-create",
+						Body: langfuse.SpanBody{
+							ID: tc.ID, TraceID: runID, ParentObservationID: genID,
+							Name: tc.Function.Name, StartTime: toolStart,
+							Input: tc.Function.Arguments,
+						},
+					})
+				}
 				result, toolErr := a.toolExec.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+				toolEnd := time.Now()
 				if toolErr != nil {
 					result = fmt.Sprintf("ERROR: %v", toolErr)
 				}
 				toolMsg, dbContent := a.processToolResult(userID, sessionID, writer, tc, result, isSubagent)
 				tcResults[i] = toolCallRes{
 					toolMsg: toolMsg, dbContent: dbContent,
-					toolErr: toolErr, toolStart: toolStart,
+					toolErr: toolErr, toolStart: toolStart, toolEnd: toolEnd,
 				}
 			}()
 		}
@@ -796,6 +897,18 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 			}
 			// 有语义的工具：写 DB + 记录详细日志 + 推送完成事件
 			a.persistToolResult(userID, sessionID, writer, tc, r.dbContent, r.toolErr, r.toolStart, start, &pendingCalls)
+			// Langfuse: 埋点 5 — span-update（记录工具调用结束）+ 积累 context
+			toolContextBuf.WriteString(fmt.Sprintf("Tool: %s\nResult: %s\n\n", tc.Function.Name, r.dbContent))
+			if a.langfuseClient != nil {
+				endTime := r.toolEnd
+				a.langfuseClient.Enqueue(langfuse.Event{
+					ID: uuid.New().String(), Timestamp: endTime, Type: "span-update",
+					Body: langfuse.SpanBody{
+						ID: tc.ID, TraceID: runID, EndTime: &endTime,
+						Output: r.dbContent,
+					},
+				})
+			}
 		}
 		newestUsrMsg = bytes.TrimSpace(newestUsrMsg)
 
@@ -879,7 +992,8 @@ type runState struct {
 	toolsChars int
 	histChars  int
 	userChars  int
-	isSubagent bool // 当前会话是否为子 agent，true 时跳过 AddOriginMessage 写入
+	isSubagent      bool   // 当前会话是否为子 agent，true 时跳过 AddOriginMessage 写入
+	parentSessionID string // 子 agent 的父会话 ID（isSubagent=true 时有值）
 }
 
 // initRun 执行 Run 前的初始化：持久化用户消息、加载历史与 KV、
@@ -887,8 +1001,10 @@ type runState struct {
 func (a *Agent) initRun(ctx context.Context, userID, sessionID, userInput string) (*runState, error) {
 	// 1. 检查是否为子 agent 会话（影响 origin 消息写入策略）
 	isSubagent := false
+	parentSessionID := ""
 	if sess, err := storage.GetSession(sessionID); err == nil && sess != nil {
 		isSubagent = sess.IsSubagent
+		parentSessionID = sess.ParentSessionID
 	}
 
 	// 2. 持久化用户消息（dbUserInput：追加文件工具提示，引导 LLM 主动读取文件内容）
@@ -973,13 +1089,14 @@ func (a *Agent) initRun(ctx context.Context, userID, sessionID, userInput string
 		}
 	}
 	return &runState{
-		messages:   messages,
-		tools:      tools,
-		promptBD:   promptBD,
-		toolsChars: toolsChars,
-		histChars:  histChars,
-		userChars:  userChars,
-		isSubagent: isSubagent,
+		messages:        messages,
+		tools:           tools,
+		promptBD:        promptBD,
+		toolsChars:      toolsChars,
+		histChars:       histChars,
+		userChars:       userChars,
+		isSubagent:      isSubagent,
+		parentSessionID: parentSessionID,
 	}, nil
 }
 
@@ -1064,6 +1181,9 @@ func (a *Agent) processToolResult(userID, sessionID string, writer StreamWriter,
 			delivered := 0
 			var deliveredURLs []string
 			for _, imgURL := range genImages {
+				if delivered >= maxGeneratedImagesPerExec {
+					break
+				}
 				if imgErr := writer.WriteImage(imgURL); imgErr != nil {
 					logger.Warn("agent", userID, sessionID, "WriteImage(generatedImages) failed: "+imgErr.Error(), 0)
 				} else {
@@ -1072,6 +1192,12 @@ func (a *Agent) processToolResult(userID, sessionID string, writer StreamWriter,
 				}
 			}
 			if delivered > 0 {
+				if len(genImages) > maxGeneratedImagesPerExec {
+					orig := len(genImages)
+					genImages = genImages[:maxGeneratedImagesPerExec]
+					logger.Warn("agent", userID, sessionID,
+						fmt.Sprintf("exec generated %d images, only delivering first %d (limit=%d)", orig, delivered, maxGeneratedImagesPerExec), 0)
+				}
 				result = injectImageDeliveryNote(result, deliveredURLs, isSubagent)
 				dbContent = result
 			}
@@ -1435,6 +1561,9 @@ func (a *Agent) Shutdown(timeout time.Duration) {
 			logger.Warn("agent", "", "", "[shutdown] timeout waiting for background goroutines, forcing exit", 0)
 			return
 		}
+	}
+	if a.langfuseClient != nil {
+		a.langfuseClient.Flush()
 	}
 	logger.Info("agent", "", "", "[shutdown] all background goroutines finished cleanly", 0)
 }
@@ -2398,7 +2527,7 @@ Existing self-improving skills (update if relevant, create new if no match):
 
 If worth saving, call the skill tool:
 1. skill(action=write, skill_id=<id>, content=<SKILL.md>)
-2. [Optional] skill(action=write, skill_id=<id>, sub_path="script/<name>.py",     content=<code>)
+2. [Optional] skill(action=write, skill_id=<id>, sub_path="scripts/<name>.py",    content=<code>)
 3. [Optional] skill(action=write, skill_id=<id>, sub_path="references/<name>.md", content=<doc>)
 4. [Optional] skill(action=write, skill_id=<id>, sub_path="assets/<name>",        content=<data>)
 5. skill(action=reload)  — must call after all files are written
@@ -2432,7 +2561,7 @@ Rules:
 If nothing is worth saving, reply: SKIP`
 
 // maybeCreateSelfImprovingSkill 在后台审查会话，若有价值则通过 mini agent loop
-// 自动生成或更新技能文件（支持多文件：SKILL.md + script/references/assets）。
+// 自动生成或更新技能文件（支持多文件：SKILL.md + scripts/references/assets）。
 // 在有工具调用的对话结束后异步调用（go ...），不阻塞主流程。
 // messages 为 Run() 循环结束时的 in-memory 消息切片，包含完整工具调用和结果。
 func (a *Agent) maybeCreateSelfImprovingSkill(userID, sessionID string, messages []llm.ChatMessage) {
@@ -2605,10 +2734,10 @@ func execSelfImprovingSkillTool(argsJSON, siBaseDir string) string {
 			}
 			targetPath = filepath.Join(skillDir, "SKILL.md")
 		} else {
-			if !strings.HasPrefix(args.SubPath, "script/") &&
+			if !strings.HasPrefix(args.SubPath, "scripts/") &&
 				!strings.HasPrefix(args.SubPath, "references/") &&
 				!strings.HasPrefix(args.SubPath, "assets/") {
-				return `{"error":"sub_path must start with script/, references/, or assets/"}`
+				return `{"error":"sub_path must start with scripts/, references/, or assets/"}`
 			}
 			targetPath = filepath.Join(skillDir, filepath.Clean(args.SubPath))
 			if !strings.HasPrefix(targetPath, skillDir+string(filepath.Separator)) {
@@ -2701,7 +2830,7 @@ func selfImprovingSkillTool() llm.Tool {
 					"content":  map[string]any{"type": "string"},
 					"sub_path": map[string]any{
 						"type":        "string",
-						"description": "Omit for SKILL.md. Or: script/<name> / references/<name> / assets/<name>",
+						"description": "Omit for SKILL.md. Or: scripts/<name> / references/<name> / assets/<name>",
 					},
 				},
 				"required": []string{"action"},

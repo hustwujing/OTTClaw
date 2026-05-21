@@ -6,7 +6,10 @@
 // internal/storage/cron_run_history.go — 定时任务执行历史 CRUD
 package storage
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // CreateCronRunHistory 写入一条 running 状态的执行记录，返回主键 ID 供后续更新。
 func CreateCronRunHistory(jobID, userID, jobName, sessionID string) (uint, error) {
@@ -96,6 +99,18 @@ func ListCronRunHistoryPaged(userID, jobName string, page, pageSize int) ([]Cron
 	offset := (page - 1) * pageSize
 	err := q.Order("started_at DESC").Offset(offset).Limit(pageSize).Find(&rows).Error
 	return rows, total, err
+}
+
+// DeleteCronRunHistoryByID 删除单条执行历史记录（需校验 userID 归属）。
+func DeleteCronRunHistoryByID(id uint, userID string) error {
+	res := DB.Where("id = ? AND user_id = ?", id, userID).Delete(&CronRunHistory{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("history record %d not found or access denied", id)
+	}
+	return nil
 }
 
 // DeleteExpiredCronRunHistory 删除 started_at 早于 before 的终态记录（succeeded/failed/timed_out）。

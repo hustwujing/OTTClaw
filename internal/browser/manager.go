@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"OTTClaw/config"
@@ -38,14 +37,7 @@ type Manager struct {
 
 var Default = &Manager{}
 
-// killOrphans 杀掉上次遗留的同名 browser-server 进程，确保端口空闲
-func killOrphans() {
-	cmd := exec.Command("pkill", "-f", "node.*browser-server/server\\.js")
-	if err := cmd.Run(); err == nil {
-		// 找到并杀掉了残留进程，等端口释放
-		time.Sleep(300 * time.Millisecond)
-	}
-}
+// killOrphans 的实现见 manager_unix.go / manager_windows.go。
 
 // Start 启动 Node.js 子进程并等待就绪（最多 30 秒）
 func (m *Manager) Start() error {
@@ -73,15 +65,18 @@ func (m *Manager) Start() error {
 		fmt.Sprintf("OUTPUT_DIR=%s", config.Cfg.OutputDir),
 		fmt.Sprintf("BROWSER_HEADLESS=%s", headless),
 	)
-	// 使进程组与父进程独立，便于 SIGTERM 精确杀进程
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// 使进程组与父进程独立，便于精确发送终止信号
+	setPgid(cmd)
 
 	// 捕获 stdout 检测就绪
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("browser: stdout pipe: %w", err)
 	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("browser: stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("browser: start node: %w", err)
@@ -100,6 +95,12 @@ func (m *Manager) Start() error {
 				default:
 				}
 			}
+		}
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			logger.Warn("browser", "", "", "[node:stderr] "+scanner.Text(), 0)
 		}
 	}()
 
@@ -130,7 +131,7 @@ func (m *Manager) Stop() {
 	if m.cmd == nil || m.cmd.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-m.cmd.Process.Pid, syscall.SIGTERM)
+	sendTerm(m.cmd)
 	done := make(chan struct{})
 	go func() {
 		_ = m.cmd.Wait()

@@ -57,9 +57,10 @@ type RunningJobInfo struct {
 
 // Scheduler 后台定时任务调度器
 type Scheduler struct {
-	stop    chan struct{}
-	running map[string]*cronRunEntry // 正在运行的 job ID → 运行元数据，防重入
-	mu      sync.Mutex
+	stop     chan struct{}
+	stopOnce sync.Once
+	running  map[string]*cronRunEntry // 正在运行的 job ID → 运行元数据，防重入
+	mu       sync.Mutex
 }
 
 // Default 全局默认调度器实例
@@ -94,9 +95,9 @@ func (s *Scheduler) Start() {
 	}()
 }
 
-// Stop 停止调度器
+// Stop 停止调度器，幂等（多次调用安全）。
 func (s *Scheduler) Stop() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 }
 
 // CancelJob 向正在运行的指定 job 发送取消信号（context cancel）。

@@ -21,6 +21,24 @@ PID_FILE="$PID_DIR/server.pid"
 LOG_DIR="${LOG_DIR:-logs}"
 LOG_FILE_STDOUT="$LOG_DIR/stdout.log"
 BROWSER_SERVER_DIR="$ROOT_DIR/browser-server"
+SERVER_PORT="${SERVER_PORT:-$(grep -E '^SERVER_PORT=' "$ROOT_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')}"
+SERVER_PORT="${SERVER_PORT:-8081}"
+
+# ---- 清理占用服务端口的残留进程（不被 PID 文件跟踪的 go run 进程等） ----
+_cleanup_port() {
+  local pids
+  pids=$(lsof -ti :"$SERVER_PORT" 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    echo "[stop] 清理占用端口 $SERVER_PORT 的进程：$pids"
+    echo "$pids" | xargs kill 2>/dev/null || true
+    sleep 1
+    # 仍未退出则强杀
+    pids=$(lsof -ti :"$SERVER_PORT" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      echo "$pids" | xargs kill -9 2>/dev/null || true
+    fi
+  fi
+}
 
 # ---- 清理残留的 browser-server 子进程 ----
 _cleanup_browser_server() {
@@ -47,8 +65,14 @@ do_start() {
     if [ -f "$BROWSER_SERVER_DIR/package.json" ]; then
       if [ ! -d "$BROWSER_SERVER_DIR/node_modules" ]; then
         echo "[start] 安装 browser-server 依赖..."
-        (cd "$BROWSER_SERVER_DIR" && npm install --silent)
+        (cd "$BROWSER_SERVER_DIR" && npm ci --silent 2>/dev/null || npm install --silent)
         echo "[start] browser-server 依赖安装完成"
+      fi
+      if [ -f "$BROWSER_SERVER_DIR/node_modules/playwright-core/browsers.json" ] \
+        && ! ls "$HOME/Library/Caches/ms-playwright/"chromium_headless_shell-*/chrome-headless-shell >/dev/null 2>&1; then
+        echo "[start] Chromium 浏览器不存在，正在安装..."
+        (cd "$BROWSER_SERVER_DIR" && npx playwright install chromium 2>/dev/null)
+        echo "[start] Chromium 浏览器就绪"
       fi
     fi
   else
@@ -84,6 +108,13 @@ do_start() {
     fi
   fi
 
+  # ---- 端口占用检查 ----
+  if lsof -ti :"$SERVER_PORT" &>/dev/null; then
+    echo "[start] 错误：端口 $SERVER_PORT 已被占用（$(lsof -ti :"$SERVER_PORT" | xargs ps -p 2>/dev/null | tail -n +2 || true)）"
+    echo "[start]   请先运行：bash scripts/service.sh stop"
+    exit 1
+  fi
+
   # ---- 编译 ----
   echo "[start] 正在编译..."
   mkdir -p "$BIN_DIR"
@@ -104,38 +135,37 @@ do_start() {
 
 # ================================================================
 do_stop() {
-  if [ ! -f "$PID_FILE" ]; then
-    echo "[stop] PID 文件不存在，服务可能未在运行：$PID_FILE"
-    exit 0
-  fi
+  if [ -f "$PID_FILE" ]; then
+    PID="$(tr -d '[:space:]' < "$PID_FILE")"
+    if kill -0 "$PID" 2>/dev/null; then
+      echo "[stop] 发送 SIGTERM 到 PID=$PID..."
+      kill "$PID"
 
-  PID="$(tr -d '[:space:]' < "$PID_FILE")"
+      # 等待进程退出（最多 35 秒，覆盖 HTTP server 30s shutdown + bgWg 等待时间）
+      for i in $(seq 1 35); do
+        if ! kill -0 "$PID" 2>/dev/null; then
+          echo "[stop] 服务已停止（等待 ${i}s）"
+          break
+        fi
+        sleep 1
+      done
 
-  if ! kill -0 "$PID" 2>/dev/null; then
-    echo "[stop] 进程 PID=$PID 已不存在，清理 PID 文件"
-    rm -f "$PID_FILE"
-    exit 0
-  fi
-
-  echo "[stop] 发送 SIGTERM 到 PID=$PID..."
-  kill "$PID"
-
-  # 等待进程退出（最多 35 秒，覆盖 HTTP server 30s shutdown + bgWg 等待时间）
-  for i in $(seq 1 35); do
-    if ! kill -0 "$PID" 2>/dev/null; then
-      rm -f "$PID_FILE"
-      echo "[stop] 服务已停止（等待 ${i}s）"
-      _cleanup_browser_server
-      exit 0
+      # 超时后强制杀死
+      if kill -0 "$PID" 2>/dev/null; then
+        echo "[stop] 进程未在 35s 内退出，发送 SIGKILL..."
+        kill -9 "$PID" 2>/dev/null || true
+        echo "[stop] 服务已强制终止"
+      fi
+    else
+      echo "[stop] 进程 PID=$PID 已不存在，清理 PID 文件"
     fi
-    sleep 1
-  done
+    rm -f "$PID_FILE"
+  else
+    echo "[stop] PID 文件不存在，尝试按端口清理..."
+  fi
 
-  # 超时后强制杀死
-  echo "[stop] 进程未在 35s 内退出，发送 SIGKILL..."
-  kill -9 "$PID" 2>/dev/null || true
-  rm -f "$PID_FILE"
-  echo "[stop] 服务已强制终止"
+  # 兜底：清理任何仍占用服务端口的进程（包括 go run 启动的未跟踪进程）
+  _cleanup_port
   _cleanup_browser_server
 }
 

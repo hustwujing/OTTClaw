@@ -32,6 +32,57 @@ import (
 	"OTTClaw/internal/storage"
 )
 
+// FixSVGAmpersands 将 SVG 文本中裸 & 号（未构成合法 XML 实体引用的 &）转义为 &amp;。
+// LLM 生成的 SVG 常见问题：文本节点包含 & 符号但未转义，导致浏览器 XML 解析失败。
+// Go regexp 不支持负向前瞻，改用字符串扫描实现。
+func FixSVGAmpersands(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s) + 16)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '&' {
+			buf.WriteByte(s[i])
+			continue
+		}
+		rest := s[i+1:]
+		if svgIsValidEntity(rest) {
+			buf.WriteByte('&')
+		} else {
+			buf.WriteString("&amp;")
+		}
+	}
+	return buf.String()
+}
+
+// svgIsValidEntity 判断 & 之后的内容是否构成合法 XML 实体（amp/lt/gt/quot/apos 及数字引用）。
+func svgIsValidEntity(after string) bool {
+	for _, name := range []string{"amp;", "lt;", "gt;", "quot;", "apos;"} {
+		if strings.HasPrefix(after, name) {
+			return true
+		}
+	}
+	if len(after) > 1 && after[0] == '#' {
+		rest := after[1:]
+		if len(rest) > 0 && (rest[0] == 'x' || rest[0] == 'X') {
+			rest = rest[1:]
+			n := 0
+			for n < len(rest) && isHexDigitByte(rest[n]) {
+				n++
+			}
+			return n > 0 && n < len(rest) && rest[n] == ';'
+		}
+		n := 0
+		for n < len(rest) && rest[n] >= '0' && rest[n] <= '9' {
+			n++
+		}
+		return n > 0 && n < len(rest) && rest[n] == ';'
+	}
+	return false
+}
+
+func isHexDigitByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 // ── 安全路径检查 ──────────────────────────────────────────────────────────────
 
 // writableDirs 返回允许写入/删除/移动的目录绝对路径列表
@@ -52,7 +103,8 @@ func writableDirs() []string {
 //     但 os.MkdirAll 等系统调用会解析，导致 abs 可能含真实路径
 func isTmpPath(abs string) bool {
 	// 1. os.TempDir()（Linux: /tmp；macOS: /var/folders/...）
-	if d := os.TempDir(); abs == d || strings.HasPrefix(abs, d+string(os.PathSeparator)) {
+	// 用 filepath.Clean 去掉尾部斜杠，避免 macOS TMPDIR=/var/.../T/ 时 d+"/" 变成双斜杠导致 HasPrefix 失败
+	if d := filepath.Clean(os.TempDir()); abs == d || strings.HasPrefix(abs, d+string(os.PathSeparator)) {
 		return true
 	}
 	// 2. 字面量 /tmp
@@ -108,7 +160,7 @@ func checkWritable(path, userID string) error {
 		}
 		userSkillsDir := filepath.Join(skillsDir, "users", userID)
 		if abs != userSkillsDir && !strings.HasPrefix(abs, userSkillsDir+string(os.PathSeparator)) {
-			return fmt.Errorf("路径 %q 超出当前用户的技能目录范围（仅允许操作 skills/users/%s/）\n提示：写入 skill 的 script/ 或 assets/ 文件请使用 skill(action=write, skill_id=..., sub_path=script/xxx 或 assets/xxx)，无需手动创建目录", path, userID)
+			return fmt.Errorf("路径 %q 超出当前用户的技能目录范围（仅允许操作 skills/users/%s/）\n提示：写入 skill 的 scripts/ 或 assets/ 文件请使用 skill(action=write, skill_id=..., sub_path=scripts/xxx 或 assets/xxx)，无需手动创建目录", path, userID)
 		}
 		return nil
 	}
@@ -317,12 +369,18 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 		return handleReadImage(ctx, argsJSON)
 	}
 
-	// Office 文档：提示使用专用工具，避免尝试以文本方式读取二进制格式。
+	// Office 文档 / PDF：直接调底层提取函数，路径检查已由 checkInProject 完成。
 	switch ext {
-	case ".doc", ".docx", ".pptx":
-		return "", fmt.Errorf("office document (%s): use read_file(path) for text extraction", ext)
+	case ".doc":
+		return extractDoc(args.Path)
+	case ".docx":
+		return extractDocx(args.Path)
+	case ".pptx":
+		return extractPptx(args.Path)
+	case ".xlsx":
+		return extractXlsx(args.Path)
 	case ".pdf":
-		return "", fmt.Errorf("PDF file: use read_file(path) for text extraction; add pages=\"1-5\" for page range or render=true for scanned docs")
+		return extractPDF(args.Path)
 	}
 
 	// 大小限制：超出则拒绝，避免大文件全量入内存和 token
@@ -344,7 +402,7 @@ func handleFsRead(ctx context.Context, argsJSON string) (string, error) {
 	// 检测到二进制时返回有用错误，避免乱码写入 DB 并污染上下文。
 	if bytes.IndexByte(b, 0) >= 0 {
 		mime := http.DetectContentType(b)
-		return "", fmt.Errorf("binary file (detected: %s); use read_file for images (.jpg/.png/.gif/.webp), PDFs, and Office docs (.docx/.pptx/.xlsx)", mime)
+		return "", fmt.Errorf("binary file (detected: %s); use read_file for images (.jpg/.png/.gif/.webp)", mime)
 	}
 
 	return string(b), nil
@@ -374,15 +432,20 @@ func handleFsWrite(ctx context.Context, argsJSON string) (string, error) {
 	if args.Append {
 		flag = os.O_WRONLY | os.O_CREATE | os.O_APPEND
 	}
+	content := args.Content
+	// SVG 文件：将裸 & 号转义为 &amp;，防止浏览器因 XML 解析失败而无法渲染图片
+	if strings.ToLower(filepath.Ext(args.Path)) == ".svg" {
+		content = FixSVGAmpersands(content)
+	}
 	f, err := os.OpenFile(args.Path, flag, 0o644)
 	if err != nil {
 		return "", fmt.Errorf("open file: %w", err)
 	}
 	defer f.Close()
-	if _, err := f.WriteString(args.Content); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
-	return fmt.Sprintf("已写入 %s（%d 字节）", args.Path, len(args.Content)), nil
+	return fmt.Sprintf("已写入 %s（%d 字节）", args.Path, len(content)), nil
 }
 
 // ── fs_delete ─────────────────────────────────────────────────────────────────

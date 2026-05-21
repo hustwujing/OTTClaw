@@ -41,17 +41,21 @@ func (InviteCode) TableName() string { return "invite_codes" }
 
 // Session 会话表，存储会话元数据和 KV 上下文
 type Session struct {
-	SessionID        string    `gorm:"primaryKey;column:session_id"`
-	UserID           string    `gorm:"column:user_id;index;not null"`
-	KVData           string    `gorm:"column:kv_data;type:text"`              // JSON 格式的 KV 上下文
-	Title            string    `gorm:"column:title;default:''"`               // AI 生成的会话标题（空则前端用首条消息做预览）
-	Source           string    `gorm:"column:source;default:'web'"`           // 来源：web | feishu | subagent
-	FeishuPeer       string    `gorm:"column:feishu_peer;default:''"`         // 飞书对话方 ID（open_id 或 chat_id）
-	ParentSessionID  string    `gorm:"column:parent_session_id;default:''"` // 血缘父会话（显式续话或压缩衍生时设置）
-	IsSubagent       bool      `gorm:"column:is_subagent;default:false"`      // 是否为子 agent 会话
-	SubagentTask     string    `gorm:"column:subagent_task;type:text;default:''"` // 子 agent 被分配的任务描述
-	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt        time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	SessionID        string     `gorm:"primaryKey;column:session_id"`
+	UserID           string     `gorm:"column:user_id;index;not null"`
+	KVData           string     `gorm:"column:kv_data;type:text"`              // JSON 格式的 KV 上下文
+	Title            string     `gorm:"column:title;default:''"`               // AI 生成的会话标题（空则前端用首条消息做预览）
+	Source           string     `gorm:"column:source;default:'web'"`           // 来源：web | feishu | subagent
+	FeishuPeer       string     `gorm:"column:feishu_peer;default:''"`         // 飞书对话方 ID（open_id 或 chat_id）
+	ParentSessionID  string     `gorm:"column:parent_session_id;default:''"` // 血缘父会话（显式续话或压缩衍生时设置）
+	IsSubagent       bool       `gorm:"column:is_subagent;default:false"`      // 是否为子 agent 会话
+	SubagentTask     string     `gorm:"column:subagent_task;type:text;default:''"` // 子 agent 被分配的任务描述
+	// Langfuse Task Unit 评估字段
+	LangfuseCursorMsgID  uint       `gorm:"column:langfuse_cursor_msg_id;default:0"`  // 游标：下次评估的起始 origin 消息 ID
+	LastOriginMsgAt      time.Time  `gorm:"column:last_origin_msg_at"`                // 最后一条 origin 消息写入时间（AddOriginMessage 时同步）
+	LangfuseScoringAt    *time.Time `gorm:"column:langfuse_scoring_at"`               // 原子评估锁：非 nil 且在 5 分钟内表示有协程正在处理
+	CreatedAt           time.Time  `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 // SubTask 子 agent 任务表：追踪每个子 agent 任务的完整生命周期
