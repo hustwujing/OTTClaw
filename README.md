@@ -24,11 +24,13 @@ Agent 的角色和技能通过纯文本配置文件定义（`ROLE.md` + `SKILL.m
 - **并行子 Agent**：主 Agent 可将复杂任务自动拆解为多个子 Agent 并行执行，子任务完成后自动汇总；前端实时显示每个子任务的进度卡片，结果通过 SSE 推送
 - **多 LLM 支持**：OpenAI / Anthropic / 任何 OpenAI 兼容接口，支持多节点 round-robin 负载均衡
 - **浏览器自动化**：稳定的浏览器操作，内置 Playwright sidecar，支持爬取、填表、截图，按用户隔离 Cookie 和登录态
-- **长期记忆**：跨会话持久化 Agent 笔记（环境约定、用户偏好）与用户人设；内置后台 flush/review 机制，配合跨会话全文搜索召回历史上下文
+- **桌面控制**：可选接入本机桌面（`DESKTOP_ENABLED=true`），截图、移动鼠标、点击、键入、滚动、拖拽，跨平台纯 shell-out 实现（macOS / Linux / Windows），与浏览器工具配合完成 GUI 自动化流程
+- **长期记忆**：跨会话持久化 Agent 笔记（环境约定、用户偏好）与用户人设；另有全员共享的系统级笔记（`system_notes`），适合写入工具特性、环境约定等全局知识；内置后台 flush/review 机制，配合跨会话全文搜索召回历史上下文
 - **自我进化技能**：Agent 自动将高频重复操作提炼为技能，近似 LFU 淘汰冷门技能，持续优化工作流程
 - **定时任务**：支持 cron 表达式、固定间隔、单次定时三种触发方式；Web 界面可查看执行历史，支持实时取消/强制中止/立即触发
-- **多平台接入**：内置 Web 界面、飞书长连接、企业微信 Webhook、Python 终端客户端
-- **完整工具集**：文件系统、Shell 执行（带审批流）、KV 存储、定时任务、MCP 集成、Office 文档生成
+- **多平台接入**：内置 Web 界面、飞书长连接、企业微信 Webhook、微信个人号、Python 终端客户端
+- **完整工具集**：文件系统、Shell 执行（含 AST 级静态安全分析，自动拦截反弹 Shell / curl|sh 等危险模式）、代码检索（tree/glob/grep/AST/comby）、KV 存储、定时任务、MCP 集成、Office 文档生成
+- **可观测性（Langfuse）**：可选接入 Langfuse，自动上报 Agent trace、LLM generation、工具 span，并对每段对话异步评估任务完成度（Task Unit Score），全链路可观测
 
 ---
 
@@ -148,6 +150,10 @@ bash scripts/client.sh
 
 它可以代你上网搜集资料、填表、截图。遇到验证码会停下来问你；遇到扫码登录会把二维码发给你；遇到滑块验证会尝试自动绕过。
 
+### 控制桌面
+
+启用 `DESKTOP_ENABLED=true` 后，它可以直接控制你的机器：截图、移动鼠标、点击、键入文字、按快捷键、滚动页面、拖拽元素。典型用法是用截图"看"当前屏幕状态，然后决定下一步操作，像人一样完成 GUI 任务——即便没有浏览器也能工作（操作桌面应用、IDE、终端等）。
+
 ### 并行子任务
 
 对于复杂任务，它会自动拆分成多个子任务，派发给多个独立子 Agent 并行执行。你在聊天界面可以实时看到每个子任务的进度卡片（正在进行 / 已完成 / 失败），父 Agent 在全部子任务完成后自动汇总结果推送给你——无需等待、无需刷新。
@@ -156,10 +162,11 @@ bash scripts/client.sh
 
 可以设置定时任务，比如每天早上发一条消息提醒、定时抓取股市信息等。直接用对话下达指令即可。Web 界面"定时任务历史"面板可查看所有执行记录，支持搜索、分页，并可对运行中的任务执行取消 / 强制中止，或随时手动触发。
 
-### 绑定飞书 / 企微
+### 绑定飞书 / 企微 / 微信
 
 跟它说"我要绑定飞书"，它会一步步引导你完成配置，之后在飞书上也能直接跟它对话。
 跟它说"绑定企微机器人"或"绑定飞书群机器人"，它会引导你获取 Webhook，之后你可以让它主动往群里发消息。
+微信个人号同样支持：跟它说"绑定微信"，它会弹出二维码，扫码后即可在微信里收发消息（需在 `.env` 中提前设置 `WEIXIN_ENCRYPT_KEY`）。
 
 ### 创建自定义技能
 
@@ -233,7 +240,7 @@ bash scripts/gen-token.sh token alice 24h
 skills/
   ${user_name}/
     SKILL.md      ← 技能定义
-    script/       ← 可执行脚本（可选）
+    scripts/      ← 可执行脚本（可选）
     assets/       ← 用户资产（可选）
     references/   ← 参考资料（可选）
 ```
@@ -274,10 +281,11 @@ AI：好的，先告诉我触发时机和执行流程…（引导完成后热更
 
 ### 长期记忆
 
-Agent 拥有两层跨会话持久记忆：
+Agent 拥有三层跨会话持久记忆：
 
-- **notes**：Agent 自身的环境笔记，用 `§` 分隔条目，记录工具特性、环境约定、稳定规律等
-- **persona**：用户人设，记录用户姓名、角色、偏好、沟通风格等自由文本
+- **notes**：Agent 自身的环境笔记（per-user），用 `§` 分隔条目，记录工具特性、环境约定、稳定规律等
+- **persona**：用户人设（per-user），记录用户姓名、角色、偏好、沟通风格等自由文本
+- **system_notes**：全员共享的系统级笔记（管理员 / Agent 写入），适合写入整个平台的工具约束、环境特性等全局知识，所有用户的会话均可见
 
 每次会话结束后，Agent 会在后台自动 flush 新知识到记忆；每隔 N 轮还会触发 review，清理过时条目。所有写入前均进行安全扫描，拦截不可见 Unicode 字符和 prompt injection 尝试。
 
@@ -292,7 +300,7 @@ Agent 在完成高频重复操作后，会自动将操作流程提炼为技能�
 - 超出上限时淘汰得分最低的技能
 - 新技能有保护窗口，窗口期内不参与淘汰
 
-所有自进化写入同样经过安全扫描：SKILL.md 检查 prompt injection，`script/` 文件额外检查反弹 Shell / base64+exec / curl|sh 等危险命令模式。
+所有自进化写入同样经过安全扫描：SKILL.md 检查 prompt injection，`scripts/` 文件额外检查反弹 Shell / base64+exec / curl|sh 等危险命令模式。
 
 ### 并行子 Agent
 
@@ -337,6 +345,7 @@ Agent 在完成高频重复操作后，会自动将操作流程提炼为技能�
 | `MEMORY_NOTES_CHAR_LIMIT` | `2200` | Agent notes 字符上限 |
 | `MEMORY_PERSONA_CHAR_LIMIT` | `1375` | 用户人设字符上限 |
 | `MEMORY_SKILL_KV_ENTRY_LIMIT` | `200` | user_kv 每用户最大条目数 |
+| `SYSTEM_NOTES_CHAR_LIMIT` | `1024` | 系统级笔记（全员共享）字符上限 |
 | `SESSION_SEARCH_ENABLED` | `true` | 是否启用跨会话全文搜索工具 |
 | `SESSION_SEARCH_SUMMARY_MAX_CHARS` | `50000` | 摘要上下文窗口最大字符数（居中截断） |
 
@@ -366,10 +375,17 @@ Agent 在完成高频重复操作后，会自动将操作流程提炼为技能�
 | `FEISHU_SPINNER_INTERVAL_MS` | `800` | 飞书侧 spinner 刷新间隔（毫秒） |
 | `FEISHU_PENDING_TIMEOUT_MIN` | `30` | 等待用户操作（上传文件等）超时分钟数 |
 
+### 微信个人号集成
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WEIXIN_ENCRYPT_KEY` | _(空)_ | AES-GCM 加密用户微信 token 的服务端密钥（绑定微信前必须设置） |
+
 ### 工具行为
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
+| `DESKTOP_ENABLED` | `false` | 是否启用桌面控制工具（截图 / 鼠标 / 键盘），仅在有物理/虚拟桌面的机器上启用 |
 | `TOOL_SCRIPT_TIMEOUT_SEC` | `60` | run_script 工具执行超时（秒） |
 | `TOOL_EXEC_TIMEOUT_SEC` | `1800` | exec 工具总超时（秒，30 分钟） |
 | `TOOL_EXEC_YIELD_MS` | `10000` | exec 工具默认 yield 等待时间（毫秒） |
@@ -381,12 +397,24 @@ Agent 在完成高频重复操作后，会自动将操作流程提炼为技能�
 | `UPLOAD_MAX_BYTES` | `20971520` | 单次上传文件大小上限（20 MB） |
 | `MCP_CONFIG_PATH` | `config/mcp.json` | MCP server 配置文件路径 |
 
+### Langfuse 可观测性（可选）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `LANGFUSE_ENABLED` | `false` | 是否启用 Langfuse 上报 |
+| `LANGFUSE_BASE_URL` | `http://localhost:3000` | Langfuse 服务地址（自托管或云端） |
+| `LANGFUSE_PUBLIC_KEY` | _(空)_ | Langfuse Project Public Key |
+| `LANGFUSE_SECRET_KEY` | _(空)_ | Langfuse Project Secret Key |
+| `LANGFUSE_SCORER_IDLE_MINUTES` | `15` | 会话静默多少分钟后触发任务完成度评估 |
+| `LANGFUSE_SCORER_MAX_WINDOW` | `20` | 单次评估最多取最近 N 条消息 |
+
+启用后，每次 Agent 运行自动上报：顶层 `trace`（含 session/user/input）、`generation`（LLM 调用、token 用量）、`span`（每个工具调用耗时）；后台异步对每段对话评估任务完成度，score 挂载到对应 trace。
+
 ### 外部服务（可选）
 
 | 变量 | 说明 |
 |---|---|
 | `NANO_BANANA_API_KEY` | 图像生成 API Key |
-| `TAVILY_API_KEY` | 网络搜索（tvly CLI） |
 | `FIRECRAWL_API_KEY` | 反爬回退（summarize CLI） |
 | `APIFY_API_TOKEN` | YouTube 字幕提取备用 |
 | `HONCHO_ENABLED` | 启用 Honcho AI-native memory 平台集成 |
@@ -410,7 +438,9 @@ cd browser-server && npm install
 launch → navigate → snapshot（获取带 ref 的元素树）→ click/type（按 ref 操作）
 ```
 
-支持登录场景：检测到登录页时，AI 弹出选项——本地运行可打开有头浏览器引导用户登录，完成后自动保存 Cookie，无头模式重启后恢复登录态。
+支持登录场景：`navigate` / `snapshot` 自动检测登录墙（HTTP 401、标题含"需要登录"等特征词），返回 `needsLogin` 字段后 AI 立即停止重试，弹出选项引导用户登录——本地运行可打开有头浏览器完成登录，完成后按域名过滤保存 Cookie，无头模式重启后恢复登录态。
+
+同样自动检测 WAF / Cloudflare 拦截（HTTP 403/429/503、标题含反爬特征词），返回 `antiBot` 字段提示。
 
 ---
 
@@ -422,6 +452,7 @@ launch → navigate → snapshot（获取带 ref 的元素树）→ click/type�
 | 控制台 | `bash scripts/client.sh` | 无需配置 |
 | 飞书机器人 | WebSocket 长连接，无需公网地址 | 对话中说"配置飞书机器人" |
 | 企业微信 | Webhook | 对话中说"配置企业微信" |
+| 微信个人号 | 扫码绑定，收发消息 | 设置 `WEIXIN_ENCRYPT_KEY`，对话中说"绑定微信" |
 
 ---
 
@@ -434,7 +465,8 @@ OTTClaw/
 │   ├── config.go            # 全局配置
 │   ├── ROLE.md              # AI 角色定义（热更新）
 │   ├── TOOL.md              # 工具详细说明（按需懒加载）
-│   └── mcp.json             # MCP server 配置（可选）
+│   ├── mcp.json             # MCP server 配置（可选）
+│   └── bootstrap/           # 初始化引导模板（ROLE.md 默认内容等）
 ├── skills/
 │   ├── system/              # 内置系统技能
 │   └── users/               # 用户自定义技能
@@ -446,14 +478,17 @@ OTTClaw/
 │   │   ├── runner.go        # 子 Agent 调度：派发、批量通知、汇总
 │   │   ├── spawn_cmd.go     # /subagents spawn 命令解析
 │   │   ├── cron_runner.go   # 定时任务 Agent 执行封装
-│   │   ├── orphan_recovery.go  # 孤儿子任务恢复（进程重启后修复卡住任务）
-│   │   ├── subtask_gc.go    # 过期子任务定期清理
-│   │   ├── background_writer.go  # 后台静默写入器
-│   │   └── subagent_writer.go    # 子 Agent SSE 推送写入器
+│   │   ├── orphan_recovery.go   # 孤儿子任务恢复（进程重启后修复卡住任务）
+│   │   ├── subtask_gc.go        # 过期子任务定期清理
+│   │   ├── session_scorer.go    # Langfuse Task Unit Score 异步评估
+│   │   ├── titler.go            # 会话自动命名
+│   │   ├── background_writer.go # 后台静默写入器
+│   │   └── subagent_writer.go   # 子 Agent SSE 推送写入器
 │   ├── llm/                 # LLM 客户端（OpenAI / Anthropic）
-│   ├── tool/                # 工具注册与执行（含 memory / session_search）
+│   ├── tool/                # 工具注册与执行（含 memory / session_search / desktop / code_search / exec_safety）
 │   ├── skill/               # 技能加载、热更新、LFU 管理、安全扫描
-│   ├── browser/             # Playwright sidecar 管理
+│   ├── browser/             # Playwright sidecar 管理（含 manager_unix.go / manager_windows.go 跨平台实现）
+│   ├── langfuse/            # Langfuse 可观测性客户端（异步批量上报）
 │   ├── handler/             # HTTP 路由
 │   │   ├── sse.go           # SSE 流式对话
 │   │   ├── ws.go            # WebSocket 对话
@@ -474,12 +509,14 @@ OTTClaw/
 │   ├── index.html           # Web 聊天界面
 │   └── client.py            # Python 控制台客户端
 ├── cmd/gen-token/           # 邀请码 / JWT 签发工具
+├── cmd/migrate-scorer/      # 历史 session 评分迁移工具（一次性）
 └── scripts/
-    ├── start.sh             # 启动服务
-    ├── stop.sh              # 停止服务
-    ├── service.sh           # 服务管理封装：start / stop / status
+    ├── service.sh           # 服务管理：start / stop（含端口清理、自动编译）
     ├── gen-token.sh         # 签发邀请码 / JWT
-    └── pack.sh              # 打包发行 zip
+    ├── build.sh             # 仅编译二进制
+    ├── deploy.sh            # 打包 + 上传到远端服务器
+    ├── pack.sh              # 打包发行 zip
+    └── client.sh            # 启动 Python 控制台客户端
 ```
 
 ---
