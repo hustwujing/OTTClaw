@@ -657,7 +657,9 @@ func (a *Agent) Run(ctx context.Context, userID, sessionID, userInput string, wr
 				go func(text string) { _ = storage.AddOriginMessage(userID, sessionID, "assistant", text, nil) }(assistantText)
 			}
 			// 异步：在第 3 轮对话完成后生成会话 AI 标题
-			go a.maybeGenerateTitle(sessionID)
+			if !isSubagent {
+				go a.maybeGenerateTitle(sessionID)
+			}
 			if config.Cfg.SelfImprovingMinToolIters > 0 && toolCallIters >= config.Cfg.SelfImprovingMinToolIters {
 				a.bgWg.Add(1)
 				go func() {
